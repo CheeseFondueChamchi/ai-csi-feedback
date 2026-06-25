@@ -1,116 +1,109 @@
-# AI/ML-based CSI Compression (3GPP TR 38.843 study)
+# AI/ML CSI Feedback Compression (3GPP TR 38.843)
 
-A runnable, **modular** study of **AI/ML CSI feedback compression** for the NR
-air interface, following the 3GPP Release-18 study (**TR 38.843**). It pairs a
-hands-on **4-stage notebook pipeline** with an Obsidian study vault (theory,
-derivations, and a checklist of claims to verify against the primary 3GPP text).
+A runnable study of **AI/ML CSI feedback compression** for the 5G NR air interface,
+following the 3GPP Release-18 study **TR 38.843**. It compares learned autoencoders
+(CsiNet, TransNet) against the standardized **PMI codebooks** — including a faithful
+**Rel-16 enhanced Type II (eType II)** — on standards-compliant channels, scoring
+**SGCS vs feedback bits**.
 
-## Layout
-```
-csi_report/
-├── notebooks/
-│   ├── gen_channel_data.ipynb           # Stage 1: reads ChannelConfig → generates CSI datasets + PMI reports
-│   ├── model_zoo.ipynb                  # Stage 2: defines AI architectures (csinet16/32/64), saves raw models
-│   ├── train_and_test.ipynb             # Stage 3: loads dataset + raw model → trains/evaluates → saves trained model + metrics
-│   ├── comparison.ipynb                 # Stage 4: loads artifacts → renders SGCS-vs-bits comparison (synthetic vs CDL-C)
-│   ├── build_gen_channel_data.py        # emits gen_channel_data.ipynb
-│   ├── build_model_zoo.py               # emits model_zoo.ipynb
-│   ├── build_train_and_test.py          # emits train_and_test.ipynb
-│   └── build_comparison.py              # emits comparison.ipynb
-├── src/csi/                             # the modular toolkit — each file = one job
-│   ├── config.py      # ChannelConfig dataclass + save_dataset/load_dataset/dataset_dir IO contract
-│   ├── data.py        # channel SOURCE   -> generate_csi_dataset()        [synthetic, fast]
-│   ├── sionna_data.py # channel SOURCE   -> generate_sionna_csi()         [real TR 38.901 CDL via Sionna]
-│   ├── transform.py   # angular-delay 2D-DFT  + real/complex helpers
-│   ├── models.py      # two-sided codec  -> CsiNet (encode@UE / decode@gNB) [swap architecture]
-│   ├── metrics.py     # NMSE, SGCS, GCS, cosine-rho, dominant_eigenvector
-│   ├── train.py       # Standardizer + train_autoencoder() (model-agnostic)
-│   ├── quantize.py    # LatentQuantizer — real bit cost for the AI latent (fair comparison)
-│   ├── baselines.py   # CURRENT system: PMI codebooks (Type I / Type II)      [the baseline]
-│   └── __init__.py    # re-exports the public API + a module map
-├── data/                                # artifact tree: data/<channel_label>/{train.npz, test.npz, reports.npz, config.json, meta.json}
-├── models/
-│   ├── raw/           # untrained models: <arch>/{model.pt, arch.json}
-│   └── trained/       # trained models: <channel_label>/<arch>/{model.pt, metrics.json}
-├── obsidian_vault/                      # open this folder in Obsidian
-│   ├── 00 - MOC.md                      # start here (map of content)
-│   ├── 01 - Concepts/  02 - Math/  03 - To Verify/
-```
+Two things this repo does carefully:
 
-## Design philosophy: easy to read, easy to swap
-Each module has **one responsibility** and a small, stable public interface, so
-any stage can be replaced without touching the others:
+1. **Channel generation** — real 3GPP TR 38.901 CDL channels, *verified against the
+   standard's tables* before they're trusted.
+2. **eType II PMI** — a true **2D spatial–frequency, dual-polarization** codebook
+   (not a wideband stand-in), the strict baseline the AI must beat.
 
-| want to change… | edit only |
-|---|---|
-| the on-disk artifact layout + ChannelConfig serialisation | `csi/config.py` |
-| the channel data (e.g. plug in Sionna TR 38.901) | `csi/data.py` |
-| the sparsifying transform | `csi/transform.py` |
-| the neural codec (CRNet, CLNet, Transformer…) | `csi/models.py` — keep `encode/decode/forward` |
-| a metric | `csi/metrics.py` — `(truth, pred) -> float` |
-| the training recipe (loss, optimiser, schedule) | `csi/train.py` |
-| the current PMI baseline (Type I/II codebook) | `csi/baselines.py` |
+---
+
+## 1. Channel generation (`src/csi/sionna_data.py`, `verify.py`, `config.py`)
+
+A dataset is fully described by one `ChannelConfig` (carrier, SCS, RB/subcarriers,
+antennas, channel model, delay spread, UE speed, SNR, …) and generated with NVIDIA
+**Sionna**'s TR 38.901 CDL model.
+
+- **Profiles:** CDL-A / CDL-C (NLOS) and CDL-E (LOS), plus a fast synthetic channel.
+- **Verification (`csi.verify`)** — every generated channel is checked two ways:
+  - *config level*: the generator's per-cluster delays, powers, and AOD/AOA/ZOD/ZOA
+    must **exactly match** the TR 38.901 §7.7.1 tables (transcribed independently).
+  - *data level*: statistics measured from the generated `H` (unit power, delay-window
+    energy, power-delay-profile shape) must be consistent with the table.
+- **Realism knobs:** noisy CSI estimation at a given **SNR / pathloss** (`csi.add_awgn`),
+  **Doppler mobility** via UE speed + multi-time-step sampling, dual polarization.
+- **Multiprocessing:** `generate_sionna_csi_parallel()` splits generation across spawned
+  processes (~3× faster) — large datasets are practical on CPU.
 
 ```python
 import csi
-H   = csi.generate_csi_dataset(6000, n_environments=12)     # (N, n_sub, n_tx)
-Xad = csi.complex_to_real_imag(csi.to_angular_delay(H, 32))
-std = csi.Standardizer().fit(Xad)
-net = csi.CsiNet(32, 32, n_code=128)
-net, hist = csi.train_autoencoder(net, std.transform(Xad), std.transform(Xad), epochs=80)
+cfg = csi.ChannelConfig(channel_model="CDL-C", delay_spread=300e-9,
+                        rb=51, nfu=612, gnb_tx=32, dual_pol=True, snr_db=20.0)
+H = csi.generate_sionna_csi_parallel(n_jobs=8, **cfg.sionna_kwargs())   # (N, n_sub, n_tx)
+print(csi.format_report(csi.verify_cdl_table("CDL-C"),
+                        csi.verify_generated(H, "CDL-C", cfg.delay_spread, cfg.scs)))
 ```
+
+## 2. eType II PMI — true 2D spatial–frequency codebook (`src/csi/baselines.py`)
+
+Real Rel-16 enhanced Type II compresses the precoder in **both** the spatial and
+frequency domains. This is implemented properly here (`etype2_pmi_2d`):
+
+`precoder ≈ W1 · C · Wfᴴ`
+
+- **W1** — `L` spatial DFT beams (`L ≤ 6`, the Rel-16 max), **shared across polarizations**.
+- **Wf** — `M` frequency-domain DFT basis vectors (compresses variation across subbands).
+- **C** — the quantized `L×M` coefficient matrix per polarization (so **2L×M** for dual-pol),
+  with a strongest-coefficient reference, 3-bit amplitude and 8-PSK relative phase.
+- **K0 truncation** — only the `K0 = ⌈β·(2L·M)⌉` strongest coefficients are reported,
+  with a bitmap — the actual CSI-Part-2 mechanism. `β=1` gives the lossless upper bound.
+
+It operates on **per-subband precoders** (`csi.subband_precoders`) and is scored with
+**`csi.sgcs_subband`** (mean SGCS over subbands) — a stricter, more realistic metric than
+the wideband single-eigenvector SGCS used by Type I/II. The wideband Type I/II codebooks
+(`type1_pmi`, `type2_pmi`) remain as the classic baselines.
+
+> Why eType II SGCS looks modest on CDL-C: rich NLOS precoders vary across subbands and
+> need many beams, so even a *lossless* `L=6` codebook saturates (~0.6). That saturation
+> is the real-world motivation for AI-based CSI compression — not a bug.
 
 ## The 4-stage pipeline
-The analysis is now **decoupled into four execution stages** that communicate via
-on-disk artifacts. Each notebook reads from and writes to the `data/`, `models/raw/`,
-and `models/trained/` directories:
 
-**Stage 1: `gen_channel_data.ipynb`** — Channel data generation
-- Reads a `ChannelConfig` (carrier frequency, bandwidth, SCS, antenna counts, channel model, etc.)
-- Generates per-config train/test CSI datasets via Sionna TR 38.901 (CDL-C, real 3GPP channels) and synthetic (pure-NumPy, fast)
-- Computes realistic PMI (Type I/II) CSI-report data as a baseline
-- Saves to `data/<channel_label>/{train.npz, test.npz, reports.npz, config.json, meta.json}`
+Each stage reads/writes on-disk artifacts only, so stages are fully decoupled. Each
+notebook is generated by a `build_*.py` script and executed with `nbclient`.
 
-**Stage 2: `model_zoo.ipynb`** — Model definition
-- Defines AI two-sided architectures (CsiNet16/32/64 variants)
-- Saves **untrained** models to `models/raw/<arch>/{model.pt, arch.json}`
+| Stage | Notebook | What it does |
+|---|---|---|
+| 1 | `gen_channel_data.ipynb` | generate + **verify** CDL-A/C/E + synthetic datasets; compute Type I/II + eType II 2D reports → `data/<label>/` |
+| 2 | `model_zoo.ipynb` | instantiate raw CsiNet + TransNet models (+ params/FLOPs) → `models/raw/<arch>/` |
+| 3 | `train_and_test.ipynb` | train + evaluate (NMSE, SGCS, bit sweep) → `models/trained/<label>/<arch>/` |
+| 4 | `comparison.ipynb` | render **SGCS-vs-bits**: wideband PMI vs AI (top) and 2D eType II per-subband (bottom), + complexity table |
 
-**Stage 3: `train_and_test.ipynb`** — Training and evaluation
-- Loads a dataset (from Stage 1) + untrained model (from Stage 2)
-- Trains the two-sided autoencoder (encoder@UE / decoder@gNB)
-- Evaluates on test set: **NMSE**, **SGCS** (dominant eigenvector precoder accuracy), and quantized-latent bit sweep
-- Saves trained model + metrics to `models/trained/<channel_label>/<arch>/{model.pt, metrics.json}`
-
-**Stage 4: `comparison.ipynb`** — Results visualization
-- Loads datasets + PMI reports + trained metrics from artifact directories (fully decoupled, no retraining)
-- Renders clean comparison plots: **SGCS-vs-feedback-bits** showing PMI codebook vs AI codec (two panels: synthetic vs CDL-C)
-
-Each stage is **emitted by a builder** (e.g., `python notebooks/build_gen_channel_data.py` emits
-the Stage 1 notebook) and executed via nbclient.
-
-> **Key subtlety** (`obsidian_vault/02 - Math/Sparsity vs Learnable Manifold.md`):
-> per-sample sparsity is *not* enough for compression — the dataset must lie near
-> a low-dimensional manifold. The `n_environments` parameter controls this.
+**AI codecs:** `CsiNet` (CNN) and `TransNet` (transformer), latent quantized for a fair
+bit cost. Training uses GPU automatically — **CUDA → Apple-Silicon MPS → CPU**.
 
 ## Run it
+
 ```bash
-# uses the `sionna` conda env (torch, tensorflow, sionna, numpy, matplotlib...)
-
-# Execute each stage in order (each builder emits the notebook, then run via nbclient):
-python notebooks/build_gen_channel_data.py && nbclient notebooks/gen_channel_data.ipynb       # Stage 1: generate datasets
-python notebooks/build_model_zoo.py        && nbclient notebooks/model_zoo.ipynb              # Stage 2: create raw models
-python notebooks/build_train_and_test.py   && nbclient notebooks/train_and_test.ipynb        # Stage 3: train and evaluate
-python notebooks/build_comparison.py       && nbclient notebooks/comparison.ipynb             # Stage 4: visualize results
-
-# Or view the final comparison interactively:
-jupyter lab notebooks/comparison.ipynb
+# conda env `sionna` (torch, tensorflow, sionna, numpy, matplotlib …)
+python notebooks/build_gen_channel_data.py   # then run notebooks/gen_channel_data.ipynb
+python notebooks/build_model_zoo.py          # then run notebooks/model_zoo.ipynb
+python notebooks/build_train_and_test.py     # then run notebooks/train_and_test.ipynb
+python notebooks/build_comparison.py         # then run notebooks/comparison.ipynb
 ```
 
-## Study notes (Obsidian)
-Open `obsidian_vault/` as a vault in [Obsidian](https://obsidian.md). Notes use
-wikilinks, LaTeX math, and callouts. Start at **`00 - MOC.md`**. Anything marked
-**⚠️ TO VERIFY** lives in `03 - To Verify/` — confirm those against the actual
-3GPP documents before citing them.
+Each `build_*.py` (re)emits its notebook; execute the notebooks in order (e.g. via
+`nbclient` or Jupyter). `data/` and `models/` are regenerable and git-ignored.
 
-> Note: no Obsidian MCP server was configured in this environment, so the notes
-> were written directly as an Obsidian-compatible markdown vault.
+## `src/csi` modules
+
+| module | role |
+|---|---|
+| `config.py` | `ChannelConfig` + dataset IO contract (`save_dataset`/`load_dataset`) |
+| `sionna_data.py` | TR 38.901 CDL generation (`generate_sionna_csi[_parallel]`) |
+| `verify.py` | TR 38.901 §7.7.1 reference tables + channel verification |
+| `noise.py` | AWGN for noisy CSI estimation (SNR / pathloss) |
+| `baselines.py` | PMI codebooks: Type I, Type II, **eType II 2D** + per-subband helpers |
+| `transform.py` | angular-delay 2D-DFT + real/complex helpers |
+| `models.py` | `CsiNet`, `TransNet`, `model_complexity` (params/FLOPs) |
+| `metrics.py` | NMSE, SGCS, dominant eigenvector |
+| `train.py`, `quantize.py` | training loop + latent quantizer |
+
+Background theory notes live in `obsidian_vault/` (open as an Obsidian vault).
