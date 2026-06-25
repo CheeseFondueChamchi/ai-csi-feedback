@@ -305,7 +305,56 @@ print('\nAll datasets verified.')
 """)
 
 
-# ── Cell 9: directory layout note ────────────────────────────────────────────
+# ── Cell 9: figure — what a generated channel looks like ─────────────────────
+md(r"""## Figure — what the generated channel looks like
+
+Two views of one generated CDL channel, to *see* what Stage 1 produced:
+
+- **Left — power-delay profile (PDP):** the empirical PDP recovered from `H` (IDFT
+  across subcarriers) with the **TR 38.901 §7.7.1 cluster table** overlaid as stems.
+  The generated energy lands on the standard's cluster delays — a visual companion to
+  the numeric verification above.
+- **Right — beamspace power:** energy per DFT beam (project `H` onto the spatial DFT
+  codebook). Shows how angularly spread/sparse the channel is — the structure the PMI
+  codebook and the AI encoder must capture.
+""")
+
+code(r"""import matplotlib.pyplot as plt
+
+cfg0 = CONFIGS[0]                                   # first config (CDL-A)
+ds   = csi.load_dataset(csi.dataset_dir(cfg0))
+Hte, cfg = ds['H_test'][:500], ds['cfg']            # a slice is plenty for the figure
+n_sub, n_tx = cfg.n_sub(), cfg.gnb_tx
+
+# --- empirical power-delay profile (IDFT across subcarriers) ---
+pdp = np.mean(np.abs(np.fft.ifft(Hte, axis=1)) ** 2, axis=(0, 2)); pdp /= pdp.max()
+bin_ns = 1e9 / (n_sub * cfg.scs)
+taps_ns = np.arange(n_sub) * bin_ns
+# --- TR 38.901 cluster delays/powers for this profile ---
+ref = csi.cdl_reference(cfg.channel_model)
+tau_ns = np.asarray(ref['delays']) * cfg.delay_spread * 1e9
+pw = 10 ** (np.asarray(ref['powers']) / 10); pw /= pw.max()
+# --- beamspace power: project onto the spatial DFT codebook ---
+B = csi.dft_codebook(n_tx, 1)                       # n_tx orthogonal DFT beams
+beam = np.mean(np.abs(Hte @ B.conj()) ** 2, axis=(0, 1)); beam /= beam.max()
+
+fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+win = min(n_sub, int(tau_ns.max() / bin_ns) + 6)
+ax[0].plot(taps_ns[:win], 10*np.log10(pdp[:win] + 1e-6), color='#4C9BE8', lw=1.8,
+           label='empirical PDP (from H)')
+ax[0].stem(tau_ns, 10*np.log10(pw + 1e-6), linefmt='C3-', markerfmt='C3o', basefmt=' ',
+           label='TR 38.901 clusters')
+ax[0].set(xlabel='delay (ns)', ylabel='power (dB)', ylim=(-30, 3),
+          title=f'{cfg.channel_model} power-delay profile (DS={cfg.delay_spread*1e9:.0f} ns)')
+ax[0].legend(fontsize=8)
+ax[1].plot(np.arange(n_tx), beam, color='#7E57C2', lw=1.8)
+ax[1].set(xlabel='DFT beam index', ylabel='beam power (norm.)',
+          title=f'{cfg.channel_model} beamspace power ({n_tx} beams)')
+plt.tight_layout(); plt.show()
+""")
+
+
+# ── Cell 10: directory layout note ───────────────────────────────────────────
 md(r"""## Per-config directory layout
 
 ```

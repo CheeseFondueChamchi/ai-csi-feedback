@@ -13,20 +13,72 @@ WHY THIS MODULE EXISTS
          the generator is configured with (Sionna's bundled model table) must
          equal the TR 38.901 table — normalized delay, power [dB], AOD, AOA,
          ZOD, ZOA, the cluster angular spreads (cASD/cASA/cZSD/cZSA) and XPR.
+         This is the AUTHORITATIVE standards-conformance check: it is an exact
+         (atol ~ 1e-6) element-wise comparison and is independent of any OFDM
+         numerology, so it proves the *intended* channel parameterization is
+         bit-for-bit the published 3GPP table.
 
       2. DATA level    — `verify_generated(H, cfg)`: statistics measured from
          the *actually generated* channel H must be consistent with the table —
-         unit average power, and the RMS delay spread implied by the power-delay
-         profile recovered from H.
+         unit average power, the fraction of power-delay-profile (PDP) energy
+         that lands inside the cluster delay span, and the PDP *shape* vs the
+         table. This proves the realized samples behave like the configured
+         model, but only up to the OFDM delay resolution (see below), so it is
+         a consistency check, not a standards proof.
+
+    The CSI-compression study this supports follows 3GPP TR 38.843 (Rel-18
+    AI/ML for the NR air interface), CSI compression sub-use-case: a two-sided
+    model (UE-side encoder, gNB-side decoder) is trained on these CDL channels,
+    scored with SGCS as the KPI against a non-AI Type II / eType II baseline
+    (TS 38.214 §5.2.2.2). Trustworthy channel generation is a prerequisite for
+    any of those numbers to mean anything — hence this verifier.
+
+WHAT THE DATA-LEVEL CHECK CAN AND CANNOT PROVE (OFDM resolution limits)
+    The PDP is recovered by an IDFT across the `n_sub` OFDM subcarriers, so the
+    delay grid has resolution `bin_dt = 1 / (n_sub * scs)` seconds and a maximum
+    unambiguous delay of `1 / scs` (the IDFT period). Consequences:
+      * Two clusters closer than `bin_dt` in delay collapse into one tap, so the
+        recovered PDP is a *band-limited, aliased* view of the true cluster set.
+        With FR1 30 kHz SCS and n_sub=256, bin_dt ≈ 130 ns — coarser than the
+        sub-cluster spacings in CDL-C, so fine PDP structure is unresolved.
+      * Any cluster whose absolute delay exceeds `1/scs` aliases (wraps) into a
+        low bin. For CDL-A (max normalized delay ≈ 9.66) with a 1000 ns delay
+        spread this is ≈ 9.66 µs > 1/scs = 33 µs (30 kHz) — safe — but stress
+        cases can wrap; treat very-long-DS energy/shape results with care.
+      * Per-cluster *angles* (AOD/AOA/ZOD/ZOA) are NOT estimable from H here:
+        that needs the BS array response and a high-resolution angle estimator.
+        Angles are therefore only checked at the config level (`verify_cdl_table`).
 
 REFERENCES
     3GPP TR 38.901 V18.0.0 §7.7.1 "CDL models":
         Table 7.7.1-1  CDL-A (NLOS, 23 clusters)
         Table 7.7.1-3  CDL-C (NLOS, 24 clusters)
-        Table 7.7.1-5  CDL-E (LOS,  14 cluster rows)
-    Delays are normalized (multiply by the desired RMS delay spread to get
-    seconds). Powers are in dB. Angles (AOD/AOA/ZOD/ZOA) are in degrees and are
+        Table 7.7.1-5  CDL-E (LOS,  14 cluster rows; the LOS ray is split into
+                                    two co-located sub-rows at delay 0)
+    3GPP TR 38.901 §7.7.3 "Scaling of delays": the table delays are *normalized*
+        (dimensionless); seconds = normalized_delay * desired_RMS_delay_spread,
+        and the table is constructed so its normalized RMS delay spread ≈ 1.0
+        (`rms_delay_spread_normalized` below verifies this).
+    Powers are in dB (relative). Angles (AOD/AOA/ZOD/ZOA) are in degrees and are
     the per-cluster mean angles before scaling by the cluster spreads.
+
+EXAMPLE (realistic FR1 n78 operating point)
+    A typical Rel-18 eType II evaluation slice — 3.5 GHz carrier, 30 kHz SCS,
+    100 MHz BW (273 PRB -> but commonly subsampled), CDL-C with a 100 ns
+    ("nominal") delay spread, gNB 32 ports (8x2 dual-pol panel):
+
+        >>> import csi
+        >>> H = csi.generate_sionna_csi(2000, model="CDL-C",
+        ...                             delay_spread=100e-9, n_tx=32,
+        ...                             n_sub=256, scs=30e3)  # (2000,256,32)
+        >>> tab = verify_cdl_table("CDL-C")            # standards conformance
+        >>> gen = verify_generated(H, "CDL-C",
+        ...                        delay_spread=100e-9, scs=30e3)
+        >>> print(format_report(tab, gen))
+
+    For FR2 (28 GHz, 120 kHz SCS) bin_dt shrinks to 1/(n_sub*120e3); for very
+    long DS (300/1000 ns, UE at 120 km/h = 33 m/s) widen n_sub to keep the
+    cluster span inside the delay window.
 
 HOW TO READ THE REPORT
     Each `verify_*` returns a dict with `ok` (bool) plus per-field diagnostics.
@@ -38,8 +90,25 @@ import numpy as np
 
 # ---------------------------------------------------------------------------
 # TR 38.901 V18.0.0 reference tables (transcribed from the standard).
-# Each profile: scalar cluster spreads + XPR, and per-cluster arrays of
-# [normalized delay, power dB, AOD°, AOA°, ZOD°, ZOA°].
+# Each profile carries:
+#   * scalar metadata — los flag, num_clusters, the four per-cluster angular
+#     spreads cASD/cASA/cZSD/cZSA (degrees) and the cross-polarization ratio
+#     xpr (dB), all from the header rows of Tables 7.7.1-1/-3/-5;
+#   * per-cluster arrays, one entry per cluster ROW, in the order:
+#       delays  — normalized delay (dimensionless; * RMS DS [s] -> seconds)
+#       powers  — cluster power [dB], relative (NOT yet normalized to sum 1)
+#       aod     — azimuth angle of departure  [deg]  (mean, pre-spread)
+#       aoa     — azimuth angle of arrival    [deg]
+#       zod     — zenith  angle of departure  [deg]
+#       zoa     — zenith  angle of arrival    [deg]
+# NOTE on "rows" vs "clusters": some rows are sub-clusters that share a delay
+# (e.g. CDL-A rows 2-4 at delay 0.4025/0.5868 etc., CDL-C rows that repeat an
+# angle triple). They are listed as separate rows in the standard and kept that
+# way here so the comparison against Sionna's JSON is element-for-element. For
+# CDL-E the first two rows are the specular LOS ray split into two sub-rows,
+# both at normalized delay 0.0 (hence num_clusters=14 but 15 rows).
+# These values are an INDEPENDENT transcription used to catch any drift in the
+# generator's bundled table; they are deliberately NOT imported from Sionna.
 # ---------------------------------------------------------------------------
 CDL_TABLES: dict[str, dict] = {
     # --- Table 7.7.1-1: CDL-A (NLOS) ------------------------------------------
@@ -92,6 +161,11 @@ CDL_TABLES: dict[str, dict] = {
                 51.9, 61.7, 58.0, 57.0],
     },
     # --- Table 7.7.1-5: CDL-E (LOS) -------------------------------------------
+    # LOS profile: cluster #1 is the strong specular ray (-0.03 dB) split into
+    # two co-located sub-rows at delay 0.0 (the second, -22.03 dB, is its weak
+    # Laplacian sub-ray). num_clusters counts physical clusters (14); the arrays
+    # below have 15 rows because of that LOS split. The K-factor is implied by
+    # the dominance of the first row.
     "CDL-E": {
         "los": 1,
         "num_clusters": 14,  # 14 cluster rows; the LOS path is split into 2 sub-rows
@@ -116,7 +190,17 @@ _SCALAR_FIELDS = ("cASD", "cASA", "cZSD", "cZSA", "xpr", "num_clusters", "los")
 
 
 def normalize_model_name(model: str) -> str:
-    """Normalize 'C', 'cdl-c', 'CDL_C' -> 'CDL-C'."""
+    """Canonicalize a CDL profile name to the 'CDL-x' form used as the dict key.
+
+    Accepts the common shorthands and casings a caller might pass: a bare
+    letter ('C'), lower/mixed case ('cdl-c'), or underscore ('CDL_C'). Steps:
+    strip surrounding whitespace, upper-case, turn '_' into '-', and prepend
+    'CDL-' if the string is not already prefixed. Note this does NOT validate
+    that the profile exists — `cdl_reference` raises KeyError for unknown names.
+
+    >>> normalize_model_name("c"), normalize_model_name("cdl_e")
+    ('CDL-C', 'CDL-E')
+    """
     m = model.strip().upper().replace("_", "-")
     if not m.startswith("CDL-"):
         m = "CDL-" + m
@@ -124,7 +208,12 @@ def normalize_model_name(model: str) -> str:
 
 
 def cdl_reference(model: str) -> dict:
-    """Return the TR 38.901 reference table for a CDL profile."""
+    """Return the transcribed TR 38.901 §7.7.1 reference table for a CDL profile.
+
+    `model` may be any spelling accepted by `normalize_model_name`. Raises
+    KeyError (listing the available profiles) if there is no transcribed table.
+    The returned dict is the live CDL_TABLES entry — treat it as read-only.
+    """
     m = normalize_model_name(model)
     if m not in CDL_TABLES:
         raise KeyError(f"No TR 38.901 reference table for {m!r} "
@@ -135,23 +224,45 @@ def cdl_reference(model: str) -> dict:
 def rms_delay_spread_normalized(model: str) -> float:
     """Normalized RMS delay spread of the table (multiply by delay_spread [s]).
 
-    Computed from the (linear-power-weighted) second central moment of the
-    normalized cluster delays. For a correctly scaled CDL this should be close
-    to 1.0 by construction, so multiplying by `delay_spread` recovers seconds.
+    Computed as the square root of the linear-power-weighted second *central*
+    moment of the normalized cluster delays:
+
+        p_i      = 10^(P_i[dB]/10),  normalized so sum_i p_i = 1   (linear power)
+        mean_tau = sum_i p_i * tau_i
+        DS_norm  = sqrt( sum_i p_i * (tau_i - mean_tau)^2 )
+
+    Per TR 38.901 §7.7.3 the published CDL tables are constructed so that this
+    normalized RMS DS ≈ 1.0; therefore `DS_norm * delay_spread` recovers the
+    intended RMS delay spread in seconds (e.g. 100 ns nominal, 300 ns long).
+    A measured DS_norm far from 1.0 would indicate a corrupted delay/power
+    column. Returns a dimensionless float. (Verified ≈ 0.99999 for CDL-C.)
     """
     ref = cdl_reference(model)
     tau = np.asarray(ref["delays"], float)
+    # dB -> linear power, then normalize so weights sum to 1 (a probability mass).
     p = 10.0 ** (np.asarray(ref["powers"], float) / 10.0)
     p = p / p.sum()
-    mean_tau = float((p * tau).sum())
-    return float(np.sqrt((p * (tau - mean_tau) ** 2).sum()))
+    mean_tau = float((p * tau).sum())                       # first moment (mean delay)
+    return float(np.sqrt((p * (tau - mean_tau) ** 2).sum()))  # sqrt of 2nd central moment
 
 
 # ---------------------------------------------------------------------------
 # 1. CONFIG-LEVEL verification: Sionna's bundled table vs the TR 38.901 table.
 # ---------------------------------------------------------------------------
 def _load_sionna_table(model: str) -> dict:
-    """Read the model table Sionna actually loads, straight from its JSON."""
+    """Read the model table Sionna actually loads, straight from its JSON.
+
+    Sionna ships the CDL parameters as JSON files alongside its `cdl` module
+    (`.../sionna/phy/channel/tr38901/models/CDL-x.json`). We read that file
+    directly rather than instantiating a `CDL` object, so the check sees the
+    *raw bundled values* (delay/power/angle arrays + cASD/cASA/cZSD/cZSA/xpr)
+    before any runtime scaling. Imports are local so importing this module does
+    not pull in Sionna/TensorFlow unless a config-level check is actually run.
+
+    Returns the parsed JSON dict; keys line up with CDL_TABLES (delays, powers,
+    aod, aoa, zod, zoa, cASD, ...). Raises if Sionna is absent or the layout
+    changed (caught by the caller and surfaced as an "error" in the report).
+    """
     import json
     from pathlib import Path
     from sionna.phy.channel.tr38901 import cdl as _cdl_mod
@@ -166,9 +277,28 @@ def verify_cdl_table(model: str, atol: float = 1e-6) -> dict:
 
     Compares every per-cluster array (delay/power/AOD/AOA/ZOD/ZOA) and every
     scalar (cluster spreads, XPR, num_clusters, LOS flag) of the table Sionna
-    loads against the standard values transcribed in CDL_TABLES.
+    loads against the standard values transcribed in CDL_TABLES. This is the
+    authoritative standards-conformance test (TR 38.901 §7.7.1): it is exact to
+    `atol` and numerology-independent, so a PASS proves the generator's intended
+    channel parameterization IS the published 3GPP table.
 
-    Returns a report dict: {model, ok, fields:{name:{max_abs_err, ok}}, ...}.
+    Per-cluster arrays first get a shape/length check (a mismatch is reported as
+    a "reason" and fails that field without raising); matching arrays are then
+    compared by max element-wise absolute error against `atol`. Scalars must be
+    present on both sides and agree within `atol`.
+
+    Parameters
+    ----------
+    model : str   — CDL profile name (any spelling `normalize_model_name` takes).
+    atol  : float — absolute tolerance (default 1e-6; the JSON values are exact
+                    so this only absorbs float round-trip noise).
+
+    Returns a report dict:
+        {model, ok, num_clusters,
+         fields: {name: {ok, max_abs_err}            # per-cluster arrays
+                       | {ok, reason}                # shape mismatch
+                       | {ok, ref, got}}}            # scalars
+    or, if the Sionna table cannot be loaded, {model, ok=False, error, fields={}}.
     """
     ref = cdl_reference(model)
     try:
@@ -179,9 +309,11 @@ def verify_cdl_table(model: str, atol: float = 1e-6) -> dict:
 
     fields: dict[str, dict] = {}
     ok = True
+    # Per-cluster vector fields: shape-match first (different cluster count or a
+    # truncated array would otherwise broadcast or raise), then max|Δ| vs atol.
     for f in _PER_CLUSTER_FIELDS:
         a = np.asarray(ref[f], float)
-        b = np.asarray(son.get(f, []), float)
+        b = np.asarray(son.get(f, []), float)   # .get(...,[]) -> empty array if key missing
         if a.shape != b.shape:
             fields[f] = {"ok": False, "reason": f"len {a.size} vs {b.size}"}
             ok = False
@@ -190,6 +322,8 @@ def verify_cdl_table(model: str, atol: float = 1e-6) -> dict:
         f_ok = err <= atol
         fields[f] = {"ok": f_ok, "max_abs_err": err}
         ok = ok and f_ok
+    # Scalar fields (spreads/xpr/num_clusters/los): must exist on both sides and
+    # agree within atol. A missing key on either side fails the field (not raise).
     for f in _SCALAR_FIELDS:
         a, b = ref.get(f), son.get(f)
         f_ok = (a is not None and b is not None and abs(float(a) - float(b)) <= atol)
@@ -226,26 +360,59 @@ def verify_generated(H: np.ndarray, model: str, delay_spread: float,
     `verify_cdl_table` (high-resolution angle estimation from H after the BS
     array response is a separate problem).
 
+    Standards context: H here is the frequency-domain CSI the UE would feed back
+    under the TR 38.843 CSI-compression use-case; the data-level check confirms
+    the realized samples carry the configured TR 38.901 delay structure before
+    they are fed to the encoder/decoder and scored with SGCS.
+
     Parameters
     ----------
-    H : complex array (N, n_sub, n_tx)  — generated channel.
+    H : complex array, shape (N, n_sub, n_tx)  — generated channel, N samples
+        over n_sub OFDM subcarriers and n_tx gNB ports (e.g. 32 = 8x2 dual-pol).
+        A 4-D array (N, T, n_sub, n_tx) with a time/slot axis T is accepted and
+        flattened over (N, T). The IDFT is taken along the subcarrier axis.
+    model : str          — CDL profile name.
+    delay_spread : float — RMS delay spread in SECONDS used at generation time
+        (e.g. 100e-9). Scales the normalized table delays into seconds.
+    scs : float          — subcarrier spacing in Hz (e.g. 30e3 for FR1 30 kHz);
+        sets the delay-bin size bin_dt = 1/(n_sub*scs) and the IDFT period 1/scs.
+    power_atol : float    — tolerance on |avg|H|^2 - 1| (default 0.05).
+    win_energy_min : float — min fraction of PDP energy inside the cluster
+        delay window for a PASS (default 0.85).
+    pdp_corr_min : float  — PDP-shape correlation threshold (reported; see note
+        below — it is NOT part of the hard gate).
+
+    Returns a report dict (see bottom of function) whose top-level `ok` gates on
+    unit power AND delay-window energy concentration only.
     """
     H = np.asarray(H)
-    if H.ndim == 4:          # (N, T, n_sub, n_tx) temporal -> flatten time
+    if H.ndim == 4:          # (N, T, n_sub, n_tx) temporal -> flatten the time axis
         H = H.reshape(-1, H.shape[-2], H.shape[-1])
-    N, n_sub = H.shape[0], H.shape[1]
+    N, n_sub = H.shape[0], H.shape[1]   # n_sub = OFDM subcarriers (== IDFT length)
 
     # --- unit average power ---------------------------------------------------
+    # Generators normalize each sample so E[|H|^2] = 1; here we average |H|^2
+    # over every (sample, subcarrier, port) element and require it ~ 1.0. This
+    # catches a mis-scaled or unnormalized generator, independent of numerology.
     avg_power = float(np.mean(np.abs(H) ** 2))
     power_ok = abs(avg_power - 1.0) <= power_atol
 
     # --- empirical power-delay profile via IDFT across subcarriers ------------
+    # H is frequency-domain; an IDFT along the subcarrier axis maps it to the
+    # delay (CIR) domain. Averaging |tap|^2 over samples and ports gives the
+    # empirical PDP. Resolution = bin_dt = 1/(n_sub*scs) s/bin; unambiguous
+    # delay span = n_sub*bin_dt = 1/scs (the IDFT period) — the OFDM limit.
     h_delay = np.fft.ifft(H, axis=1)                  # (N, n_sub, n_tx) delay taps
     pdp = np.mean(np.abs(h_delay) ** 2, axis=(0, 2))  # (n_sub,) avg power per tap
-    pdp = pdp / (pdp.sum() + 1e-12)
+    pdp = pdp / (pdp.sum() + 1e-12)                   # -> energy fraction per bin
     bin_dt = 1.0 / (n_sub * scs)                      # seconds per delay bin
 
     # --- theoretical PDP: table clusters binned onto the same delay grid ------
+    # Normalized table delays -> seconds (* delay_spread), powers dB -> linear
+    # and normalized to sum 1, then each cluster is dropped into its nearest
+    # delay bin. The `% n_sub` makes the aliasing explicit: a cluster beyond the
+    # 1/scs unambiguous span wraps, mirroring what the IDFT of H does, so `theo`
+    # stays comparable to `pdp` bin-for-bin.
     ref = cdl_reference(model)
     tau = np.asarray(ref["delays"], float) * float(delay_spread)   # seconds
     pw = 10.0 ** (np.asarray(ref["powers"], float) / 10.0)
@@ -255,11 +422,17 @@ def verify_generated(H: np.ndarray, model: str, delay_spread: float,
         theo[int(round(t / bin_dt)) % n_sub] += p
 
     # --- delay-window energy concentration ------------------------------------
+    # Window = bins spanning [0, max cluster delay] + 3 guard bins (IDFT sinc
+    # leakage spills a little past the last cluster), capped at n_sub. A correct
+    # channel puts (nearly) all its energy inside this span; the leftover beyond
+    # it is leakage/noise. This is the robust, numerology-tolerant gate.
     win = min(int(np.ceil(tau.max() / bin_dt)) + 3, n_sub)   # cluster span + guard
     win_energy = float(pdp[:win].sum())
     win_ok = win_energy >= win_energy_min
 
     # --- PDP shape correlation over the cluster window ------------------------
+    # Pearson correlation of the empirical vs theoretical PDP within the window.
+    # Guarded against zero-variance slices (would make corrcoef return nan/warn).
     a, b = pdp[:win], theo[:win]
     if a.std() > 0 and b.std() > 0:
         pdp_corr = float(np.corrcoef(a, b)[0, 1])
@@ -268,6 +441,10 @@ def verify_generated(H: np.ndarray, model: str, delay_spread: float,
     corr_ok = (pdp_corr >= pdp_corr_min)
 
     # --- informational windowed RMS delay spread (not gated) ------------------
+    # Re-normalize the in-window PDP to a probability mass, then take sqrt of its
+    # second central moment over the bin-center delays. Reported for context
+    # only: coarse bins + sinc leakage bias this away from delay_spread, so it is
+    # NOT a pass/fail criterion (see the module docstring on OFDM limits).
     pwin = pdp[:win] / (pdp[:win].sum() + 1e-12)
     taps = np.arange(win) * bin_dt
     mean_tau = float((pwin * taps).sum())
@@ -294,7 +471,17 @@ def verify_generated(H: np.ndarray, model: str, delay_spread: float,
 # Pretty-printing
 # ---------------------------------------------------------------------------
 def format_report(table_rep: dict, gen_rep: dict | None = None) -> str:
-    """Render verify_cdl_table (+ optional verify_generated) as a text table."""
+    """Render verify_cdl_table (+ optional verify_generated) as a text table.
+
+    `table_rep` is the dict from `verify_cdl_table`; `gen_rep`, if given, is the
+    dict from `verify_generated`. Produces a multi-line string: a header with the
+    overall config-level PASS/FAIL, one line per config field (max|Δ| for arrays,
+    ref/got for scalars, or the shape-mismatch reason), and — when `gen_rep` is
+    supplied — a data-level block. In the data block, avg power and delay-window
+    energy are marked ok/ERR (they form the gate), while the PDP-shape correlation
+    and windowed RMS delay spread are tagged "[inf]" (informational, not gated;
+    OFDM-resolution sensitive). Returns the string; does not print.
+    """
     lines = []
     m = table_rep.get("model", "?")
     status = "PASS ✅" if table_rep.get("ok") else "FAIL ❌"
