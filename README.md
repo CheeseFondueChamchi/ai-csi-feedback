@@ -6,26 +6,38 @@ true **Rel-16 eType II**) on standards-compliant channels, scoring **SGCS vs fee
 
 ## Pipeline
 
-```mermaid
-flowchart LR
-    CFG["ChannelConfig<br/>carrier · SCS · CDL · SNR · speed"] --> G
-
-    subgraph S1["1 - gen_channel_data"]
-      G["Sionna CDL-A/C/E"] --> V["verify vs TR 38.901"] --> R["PMI + eType II 2D reports"]
-    end
-    R --> DATA[(data)]
-
-    subgraph S2["2 - model_zoo"]
-      Z["CsiNet + TransNet"]
-    end
-    Z --> RAW[(models/raw)]
-
-    DATA --> S3["3 - train_and_test<br/>train + eval · SGCS / NMSE"]
-    RAW --> S3 --> TR[(models/trained)]
-
-    DATA --> S4["4 - comparison"]
-    TR --> S4
-    S4 --> OUT["SGCS-vs-bits figure<br/>PMI vs AI · eType II 2D"]
+```
+        ChannelConfig  (carrier · SCS · CDL profile · SNR · UE speed)
+              |
+              v
+   +---------------------------------------------------------+
+   |  STAGE 1 : gen_channel_data                             |
+   |    Sionna CDL-A/C/E  ->  verify vs TR 38.901            |
+   |                      ->  Type I/II + eType II 2D PMI    |
+   +---------------------------------------------------------+
+              |  writes
+              v
+          [ data/ ] -------------------------------+
+              |                                     |
+              v                                     |
+   +-----------------------------+                  |
+   |  STAGE 2 : model_zoo        |                  |
+   |    CsiNet + TransNet (raw)  | --> [ models/raw/ ]
+   +-----------------------------+                  |
+              |                                     |
+              v                                     |
+   +---------------------------------------------+  |
+   |  STAGE 3 : train_and_test                   |  |
+   |    data/ + raw  ->  train + eval            |  |
+   |                 ->  [ models/trained/ ]     |  |
+   +---------------------------------------------+  |
+              |                                     |
+              v                                     v
+   +---------------------------------------------------------+
+   |  STAGE 4 : comparison                                   |
+   |    data/ + trained  ->  SGCS-vs-bits figure            |
+   |    PMI   vs   AI (CsiNet/TransNet)   vs   eType II 2D   |
+   +---------------------------------------------------------+
 ```
 
 Each stage only reads/writes files in `data/` and `models/`, so they run independently.
