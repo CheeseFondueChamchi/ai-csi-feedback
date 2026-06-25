@@ -1,0 +1,14 @@
+# Large, regenerable artifacts (datasets ~GBs, model weights) — recreate via the notebooks
+data/
+models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# OS / tooling / local state
+.DS_Store
+.omc/
+.claude/
