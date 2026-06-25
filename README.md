@@ -1,109 +1,68 @@
 # AI/ML CSI Feedback Compression (3GPP TR 38.843)
 
-A runnable study of **AI/ML CSI feedback compression** for the 5G NR air interface,
-following the 3GPP Release-18 study **TR 38.843**. It compares learned autoencoders
-(CsiNet, TransNet) against the standardized **PMI codebooks** — including a faithful
-**Rel-16 enhanced Type II (eType II)** — on standards-compliant channels, scoring
-**SGCS vs feedback bits**.
+Do AI autoencoders beat the 5G NR codebooks at compressing CSI feedback?
+This repo compares **CsiNet / TransNet** against **PMI codebooks** (Type I/II and a
+true **Rel-16 eType II**) on standards-compliant channels, scoring **SGCS vs feedback bits**.
 
-Two things this repo does carefully:
+## Pipeline
 
-1. **Channel generation** — real 3GPP TR 38.901 CDL channels, *verified against the
-   standard's tables* before they're trusted.
-2. **eType II PMI** — a true **2D spatial–frequency, dual-polarization** codebook
-   (not a wideband stand-in), the strict baseline the AI must beat.
+```mermaid
+flowchart LR
+    CFG["ChannelConfig<br/>carrier · SCS · CDL · SNR · speed"] --> G
 
----
+    subgraph S1["1 - gen_channel_data"]
+      G["Sionna CDL-A/C/E"] --> V["verify vs TR 38.901"] --> R["PMI + eType II 2D reports"]
+    end
+    R --> DATA[(data)]
 
-## 1. Channel generation (`src/csi/sionna_data.py`, `verify.py`, `config.py`)
+    subgraph S2["2 - model_zoo"]
+      Z["CsiNet + TransNet"]
+    end
+    Z --> RAW[(models/raw)]
 
-A dataset is fully described by one `ChannelConfig` (carrier, SCS, RB/subcarriers,
-antennas, channel model, delay spread, UE speed, SNR, …) and generated with NVIDIA
-**Sionna**'s TR 38.901 CDL model.
+    DATA --> S3["3 - train_and_test<br/>train + eval · SGCS / NMSE"]
+    RAW --> S3 --> TR[(models/trained)]
 
-- **Profiles:** CDL-A / CDL-C (NLOS) and CDL-E (LOS), plus a fast synthetic channel.
-- **Verification (`csi.verify`)** — every generated channel is checked two ways:
-  - *config level*: the generator's per-cluster delays, powers, and AOD/AOA/ZOD/ZOA
-    must **exactly match** the TR 38.901 §7.7.1 tables (transcribed independently).
-  - *data level*: statistics measured from the generated `H` (unit power, delay-window
-    energy, power-delay-profile shape) must be consistent with the table.
-- **Realism knobs:** noisy CSI estimation at a given **SNR / pathloss** (`csi.add_awgn`),
-  **Doppler mobility** via UE speed + multi-time-step sampling, dual polarization.
-- **Multiprocessing:** `generate_sionna_csi_parallel()` splits generation across spawned
-  processes (~3× faster) — large datasets are practical on CPU.
-
-```python
-import csi
-cfg = csi.ChannelConfig(channel_model="CDL-C", delay_spread=300e-9,
-                        rb=51, nfu=612, gnb_tx=32, dual_pol=True, snr_db=20.0)
-H = csi.generate_sionna_csi_parallel(n_jobs=8, **cfg.sionna_kwargs())   # (N, n_sub, n_tx)
-print(csi.format_report(csi.verify_cdl_table("CDL-C"),
-                        csi.verify_generated(H, "CDL-C", cfg.delay_spread, cfg.scs)))
+    DATA --> S4["4 - comparison"]
+    TR --> S4
+    S4 --> OUT["SGCS-vs-bits figure<br/>PMI vs AI · eType II 2D"]
 ```
 
-## 2. eType II PMI — true 2D spatial–frequency codebook (`src/csi/baselines.py`)
+Each stage only reads/writes files in `data/` and `models/`, so they run independently.
 
-Real Rel-16 enhanced Type II compresses the precoder in **both** the spatial and
-frequency domains. This is implemented properly here (`etype2_pmi_2d`):
+## Two things done carefully
 
-`precoder ≈ W1 · C · Wfᴴ`
+**Channel generation** — real TR 38.901 CDL channels, then *checked against the standard*:
+- CDL-A/C/E (+ a fast synthetic channel), driven by one `ChannelConfig`
+- `csi.verify` confirms per-cluster delays/powers/angles match TR 38.901 §7.7.1 exactly
+- noisy CSI estimation (SNR/pathloss), Doppler mobility, dual-pol; ~3× faster via multiprocessing
 
-- **W1** — `L` spatial DFT beams (`L ≤ 6`, the Rel-16 max), **shared across polarizations**.
-- **Wf** — `M` frequency-domain DFT basis vectors (compresses variation across subbands).
-- **C** — the quantized `L×M` coefficient matrix per polarization (so **2L×M** for dual-pol),
-  with a strongest-coefficient reference, 3-bit amplitude and 8-PSK relative phase.
-- **K0 truncation** — only the `K0 = ⌈β·(2L·M)⌉` strongest coefficients are reported,
-  with a bitmap — the actual CSI-Part-2 mechanism. `β=1` gives the lossless upper bound.
+**eType II PMI** — the *true* Rel-16 codebook, not a wideband stand-in:  `W = W1 · C · Wfᴴ`
+- **W1** = L spatial beams (L ≤ 6), **Wf** = M frequency beams, **C** = per-polarization coefficients
+- spatial **and** frequency compression, dual-pol, K0 coefficient truncation
+- scored per-subband (`sgcs_subband`) — the strict baseline the AI must beat
 
-It operates on **per-subband precoders** (`csi.subband_precoders`) and is scored with
-**`csi.sgcs_subband`** (mean SGCS over subbands) — a stricter, more realistic metric than
-the wideband single-eigenvector SGCS used by Type I/II. The wideband Type I/II codebooks
-(`type1_pmi`, `type2_pmi`) remain as the classic baselines.
-
-> Why eType II SGCS looks modest on CDL-C: rich NLOS precoders vary across subbands and
-> need many beams, so even a *lossless* `L=6` codebook saturates (~0.6). That saturation
-> is the real-world motivation for AI-based CSI compression — not a bug.
-
-## The 4-stage pipeline
-
-Each stage reads/writes on-disk artifacts only, so stages are fully decoupled. Each
-notebook is generated by a `build_*.py` script and executed with `nbclient`.
-
-| Stage | Notebook | What it does |
-|---|---|---|
-| 1 | `gen_channel_data.ipynb` | generate + **verify** CDL-A/C/E + synthetic datasets; compute Type I/II + eType II 2D reports → `data/<label>/` |
-| 2 | `model_zoo.ipynb` | instantiate raw CsiNet + TransNet models (+ params/FLOPs) → `models/raw/<arch>/` |
-| 3 | `train_and_test.ipynb` | train + evaluate (NMSE, SGCS, bit sweep) → `models/trained/<label>/<arch>/` |
-| 4 | `comparison.ipynb` | render **SGCS-vs-bits**: wideband PMI vs AI (top) and 2D eType II per-subband (bottom), + complexity table |
-
-**AI codecs:** `CsiNet` (CNN) and `TransNet` (transformer), latent quantized for a fair
-bit cost. Training uses GPU automatically — **CUDA → Apple-Silicon MPS → CPU**.
-
-## Run it
+## Run
 
 ```bash
-# conda env `sionna` (torch, tensorflow, sionna, numpy, matplotlib …)
-python notebooks/build_gen_channel_data.py   # then run notebooks/gen_channel_data.ipynb
-python notebooks/build_model_zoo.py          # then run notebooks/model_zoo.ipynb
-python notebooks/build_train_and_test.py     # then run notebooks/train_and_test.ipynb
-python notebooks/build_comparison.py         # then run notebooks/comparison.ipynb
+# conda env `sionna`; build each notebook then execute it (nbclient or Jupyter), in order:
+python notebooks/build_gen_channel_data.py   #  → run gen_channel_data.ipynb
+python notebooks/build_model_zoo.py          #  → run model_zoo.ipynb
+python notebooks/build_train_and_test.py     #  → run train_and_test.ipynb   (uses GPU/MPS if present)
+python notebooks/build_comparison.py         #  → run comparison.ipynb       (the final figure)
 ```
 
-Each `build_*.py` (re)emits its notebook; execute the notebooks in order (e.g. via
-`nbclient` or Jupyter). `data/` and `models/` are regenerable and git-ignored.
+`data/` and `models/` are regenerable and git-ignored.
 
-## `src/csi` modules
+## Code (`src/csi/`)
 
-| module | role |
+| file | role |
 |---|---|
-| `config.py` | `ChannelConfig` + dataset IO contract (`save_dataset`/`load_dataset`) |
-| `sionna_data.py` | TR 38.901 CDL generation (`generate_sionna_csi[_parallel]`) |
-| `verify.py` | TR 38.901 §7.7.1 reference tables + channel verification |
-| `noise.py` | AWGN for noisy CSI estimation (SNR / pathloss) |
-| `baselines.py` | PMI codebooks: Type I, Type II, **eType II 2D** + per-subband helpers |
-| `transform.py` | angular-delay 2D-DFT + real/complex helpers |
-| `models.py` | `CsiNet`, `TransNet`, `model_complexity` (params/FLOPs) |
-| `metrics.py` | NMSE, SGCS, dominant eigenvector |
-| `train.py`, `quantize.py` | training loop + latent quantizer |
+| `config.py` | `ChannelConfig` + dataset save/load |
+| `sionna_data.py` | TR 38.901 CDL generation (+ parallel) |
+| `verify.py` | TR 38.901 reference tables + checks |
+| `baselines.py` | PMI: Type I/II + **eType II 2D** |
+| `models.py` | CsiNet, TransNet, complexity (FLOPs/params) |
+| `metrics.py`, `transform.py`, `train.py`, `quantize.py`, `noise.py` | metrics, angular-delay DFT, training, latent quantizer, AWGN |
 
-Background theory notes live in `obsidian_vault/` (open as an Obsidian vault).
+Background theory notes: `obsidian_vault/`.
