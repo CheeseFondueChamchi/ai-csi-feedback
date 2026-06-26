@@ -386,23 +386,30 @@ print('(rank-2 median 0.723, rank-4 0.624 in TR; we model rank-1.)')
 # ---------------------------------------------------------------------------
 md(r"""## AI encoder vs PMI — SGCS-vs-bits sweep (choose the model)
 
-`sweep_ai_vs_pmi(label, arch)` runs a **live** sweep: it loads a trained AI model,
-encodes the test channel, quantizes the latent at a range of bits/dim, decodes, and
-plots **AI SGCS-vs-feedback-bits** against the **PMI Type I/II** points on the same
-(wideband) axis. **Change `SWEEP_LABEL` / `SWEEP_ARCH` below and re-run the cell** to
-compare any trained model — the sweep recomputes for that model.
+`sweep_ai_vs_pmi(label, arch)` runs a **live** sweep on **one unified per-subband axis**:
+it loads a trained AI model, encodes the test channel, quantizes the latent at a range of
+bits/dim, decodes, and derives **per-subband** precoders from the reconstruction — then
+plots its SGCS-vs-bits against **Type I/II (per-subband)** and **eType II 2D**, all scored
+with the same `sgcs_subband` metric (apples-to-apples; no more wideband-vs-per-subband
+split). **Change `SWEEP_LABEL` / `SWEEP_ARCH` below and re-run** to compare any model.
 """)
 
 code(r"""import torch
 
 def sweep_ai_vs_pmi(label, arch, ai_bits=(1, 2, 3, 4, 5, 6, 8), n_eval=2000, show=True):
-    '''Live AI(encode->quantize@b->decode) SGCS-vs-bits vs PMI Type I/II for one model.'''
+    '''UNIFIED per-subband SGCS-vs-bits: AI encoder vs Type I/II (SB) vs eType II 2D.
+
+    Everything is scored on the SAME per-subband metric (mean SGCS over subbands,
+    vs the clean per-subband precoders) — apples-to-apples. The AI reconstructs the
+    full channel, so we derive per-subband precoders from its reconstruction; the
+    codebook baselines come from reports['sb_*'].'''
     ddir, tdir = csi.DATA_ROOT / label, csi.TRAINED_ROOT / label / arch
     if not (ddir / 'test.npz').exists() or not (tdir / 'model.pt').exists():
         print(f'  [missing] need data/{label} and models/trained/{label}/{arch}'); return None
     ds = csi.load_dataset(ddir); reports = ds['reports']
     Hte = ds['H_test'][:n_eval]; n_sub = Hte.shape[1]
-    W_true = np.asarray(reports['W_true'])[:n_eval]
+    n_sb = int(reports.get('n_subband', 13))
+    W_sb_true = csi.subband_precoders(Hte, n_sb)          # clean per-subband ground truth
     m = json.loads((tdir / 'metrics.json').read_text())
     N_DELAY, M = int(m.get('n_delay', 32)), int(m['n_code'])
     mu, sdv = float(m['standardizer']['mu']), float(m['standardizer']['sd'])
@@ -420,27 +427,29 @@ def sweep_ai_vs_pmi(label, arch, ai_bits=(1, 2, 3, 4, 5, 6, 8), n_eval=2000, sho
         with torch.no_grad():
             yq = net.decode(torch.tensor(lq.transform(zte, b))).cpu().numpy()
         Hq = csi.from_angular_delay(csi.real_imag_to_complex(yq * sdv + mu), n_sub)
-        ai.append((int(M * b), float(csi.sgcs(W_true, csi.dominant_eigenvector(Hq)))))
-    # PMI Type I/II points (wideband, from reports)
-    fam = [str(f) for f in reports.get('pmi_family', [])]
-    pb = [int(x) for x in reports.get('pmi_bits', [])]
-    ps = [float(x) for x in reports.get('pmi_sgcs', [])]
-    pmi = sorted((b, s) for f, b, s in zip(fam, pb, ps))
+        # per-subband precoders from the AI reconstruction -> sgcs_subband (unified metric)
+        ai.append((int(M * b), float(csi.sgcs_subband(W_sb_true, csi.subband_precoders(Hq, n_sb)))))
+    # unified per-subband codebook baselines from reports: Type I / Type II (SB) + eType II 2D
+    by_fam = {}
+    for f, b, s in zip([str(f) for f in reports.get('sb_family', [])],
+                       [int(x) for x in reports.get('sb_bits', [])],
+                       [float(x) for x in reports.get('sb_sgcs', [])]):
+        by_fam.setdefault(f, []).append((b, s))
     if show:
-        fig, ax = plt.subplots(figsize=(7.6, 5))
+        STY = {'Type I': ('#E06C3A', '^'), 'Type II': ('#E0A23A', 's'),
+               'eType II 2D': ('#C0392B', 'D')}
+        fig, ax = plt.subplots(figsize=(7.8, 5))
         ax.plot([x[0] for x in ai], [x[1] for x in ai], 'o-', color='#4C9BE8',
-                lw=1.9, ms=6, label=f'AI: {arch}')
-        if pmi:
-            ax.plot([x[0] for x in pmi], [x[1] for x in pmi], '^-', color='#E06C3A',
-                    lw=1.7, ms=7, label='PMI Type I/II')
-        if not np.isnan(reports.get('sgcs_trunc', np.nan)):
-            ax.axhline(float(reports['sgcs_trunc']), ls=':', color='#27AE60',
-                       label=f'truncation ref ({float(reports["sgcs_trunc"]):.3f})')
+                lw=2.0, ms=6, zorder=5, label=f'AI: {arch}')
+        for f, pts in by_fam.items():
+            pts = sorted(pts); col, mk = STY.get(f, ('gray', 'x'))
+            ax.plot([p[0] for p in pts], [p[1] for p in pts], marker=mk, ls='-',
+                    color=col, lw=1.6, ms=6, label=f)
         ax.set_xscale('log')
-        ax.set(xlabel='feedback report length (bits)', ylabel='SGCS (wideband)',
-               title=f'AI vs PMI — {LABEL_DISPLAY.get(label, label)} / {arch} (M={M})')
-        ax.legend(); plt.tight_layout(); plt.show()
-    return dict(ai=ai, pmi=pmi)
+        ax.set(xlabel='feedback report length (bits)', ylabel='SGCS (per-subband, unified)',
+               title=f'AI vs codebooks, per-subband — {LABEL_DISPLAY.get(label, label)} / {arch} (M={M})')
+        ax.legend(fontsize=8); plt.tight_layout(); plt.show()
+    return dict(ai=ai, codebooks=by_fam)
 
 # ── pick the model to compare (auto-default to an available one) ────────────
 _AVAIL = sorted((p.parent.parent.name, p.parent.name)
@@ -451,8 +460,9 @@ SWEEP_LABEL, SWEEP_ARCH = (_AVAIL[0] if _AVAIL else ('cdlc_3p5ghz', 'csinet64'))
 print(f'sweeping: {SWEEP_LABEL} / {SWEEP_ARCH}')
 res = sweep_ai_vs_pmi(SWEEP_LABEL, SWEEP_ARCH)
 if res:
-    print('AI (bits, SGCS):', [(b, round(s, 3)) for b, s in res['ai']])
-    print('PMI (bits, SGCS):', [(b, round(s, 3)) for b, s in res['pmi']])
+    print('AI (bits, per-subband SGCS):', [(b, round(s, 3)) for b, s in res['ai']])
+    for fam, pts in res['codebooks'].items():
+        print(f'{fam} (bits, SGCS):', [(b, round(s, 3)) for b, s in sorted(pts)][:4])
 """)
 
 

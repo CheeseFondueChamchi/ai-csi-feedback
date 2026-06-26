@@ -30,6 +30,7 @@ from .noise import add_awgn
 from .transform import to_angular_delay, from_angular_delay
 from .baselines import (
     type1_pmi, type2_pmi, etype2_pmi_2d, subband_precoders, sgcs_subband,
+    type1_pmi_subband, type2_pmi_subband,
 )
 
 # eType II 2D sweep (spatial L, frequency M) and the K0-truncation fraction.
@@ -111,4 +112,23 @@ def build_reports(H_test, n_tx, n_delay, snr_db, seed=0, dual_pol=False,
     reports['etype2_2d_schemes'] = np.array(e2d_names)
     reports['etype2_2d_bits'] = np.array(e2d_bits, dtype=int)
     reports['etype2_2d_sgcs'] = np.array(e2d_sgcs, dtype=np.float64)
+
+    # ── UNIFIED per-subband baseline track (all scored with sgcs_subband) ────
+    # Type I/II applied per subband + eType II 2D, on ONE metric basis so the
+    # comparison stage can plot codebooks vs the AI on the same per-subband axis.
+    sb_names, sb_bits, sb_sgcs, sb_fam = [], [], [], []
+    W1sb, b1 = cb(type1_pmi_subband, W_sb_est, n_tx=n_tx)
+    sb_names.append('Type I (SB)'); sb_bits.append(int(b1))
+    sb_sgcs.append(float(sgcs_subband(W_sb_true, W1sb))); sb_fam.append('Type I')
+    for L in (2, 3, 4, 6):
+        W2sb, b2 = cb(type2_pmi_subband, W_sb_est, n_tx=n_tx, L=L)
+        sb_names.append(f'Type II L={L} (SB)'); sb_bits.append(int(b2))
+        sb_sgcs.append(float(sgcs_subband(W_sb_true, W2sb))); sb_fam.append('Type II')
+    for nm, bb, ss in zip(e2d_names, e2d_bits, e2d_sgcs):     # reuse eType II 2D points
+        sb_names.append(nm); sb_bits.append(int(bb)); sb_sgcs.append(float(ss))
+        sb_fam.append('eType II 2D')
+    reports['sb_schemes'] = np.array(sb_names)
+    reports['sb_family'] = np.array(sb_fam)
+    reports['sb_bits'] = np.array(sb_bits, dtype=int)
+    reports['sb_sgcs'] = np.array(sb_sgcs, dtype=np.float64)
     return reports

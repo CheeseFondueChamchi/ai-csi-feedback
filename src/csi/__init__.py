@@ -99,6 +99,7 @@ from .quantize import LatentQuantizer
 from .baselines import (
     dft_codebook, type1_pmi, type2_pmi,
     subband_precoders, sgcs_subband, etype2_pmi_2d,
+    type1_pmi_subband, type2_pmi_subband,
 )
 # Sionna-based TR 38.901 data source (imports TensorFlow lazily, inside the call)
 from .sionna_data import (
@@ -137,6 +138,7 @@ __all__ = [
     "Standardizer", "train_autoencoder", "LatentQuantizer",
     "dft_codebook", "type1_pmi", "type2_pmi",
     "subband_precoders", "sgcs_subband", "etype2_pmi_2d",
+    "type1_pmi_subband", "type2_pmi_subband",
     "generate_sionna_csi", "generate_sionna_csi_parallel", "generate_sionna_csi_mixed",
     "CDL_TABLES", "cdl_reference", "verify_cdl_table", "verify_generated",
     "format_report", "add_awgn", "build_reports",

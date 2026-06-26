@@ -271,6 +271,47 @@ def sgcs_subband(W_true_sb: np.ndarray, W_hat_sb: np.ndarray) -> float:
                           for s in range(n_sb)]))
 
 
+def type1_pmi_subband(W_sb: np.ndarray, n_tx: int, oversampling: int = 4):
+    """Per-subband Type I PMI: report the best DFT beam INDEPENDENTLY per subband.
+
+    NR subband PMI applied subband-by-subband so it is scored on the same
+    per-subband basis as eType II 2D (sgcs_subband). The overhead is the
+    wideband single-beam cost times the number of subbands (independent
+    subbands — bit-heavy, which is exactly what eType II's frequency-domain
+    compression improves on).
+
+    W_sb : (N, n_sb, n_tx) per-subband precoders. Returns (W_hat_sb, total_bits).
+    """
+    N, n_sb, _ = W_sb.shape
+    W_hat = np.zeros_like(W_sb)
+    bits_per = 0
+    for s in range(n_sb):
+        Wh, bits_per = type1_pmi(W_sb[:, s, :], n_tx, oversampling)
+        W_hat[:, s, :] = Wh
+    return W_hat, int(bits_per * n_sb)
+
+
+def type2_pmi_subband(W_sb: np.ndarray, n_tx: int, L: int = 4, oversampling: int = 4,
+                      amp_bits: int = 3, phase_bits: int = 4):
+    """Per-subband Type II PMI: L-beam combination INDEPENDENTLY per subband.
+
+    Same idea as ``type1_pmi_subband`` for the L-beam Type II codebook; overhead
+    is the per-subband Type II cost times n_sb (no frequency-domain compression,
+    unlike eType II 2D). Scored with sgcs_subband for an apples-to-apples
+    per-subband comparison against eType II 2D and the AI codec.
+
+    W_sb : (N, n_sb, n_tx). Returns (W_hat_sb, total_bits).
+    """
+    N, n_sb, _ = W_sb.shape
+    W_hat = np.zeros_like(W_sb)
+    bits_per = 0
+    for s in range(n_sb):
+        Wh, bits_per = type2_pmi(W_sb[:, s, :], n_tx, L=L, oversampling=oversampling,
+                                 amp_bits=amp_bits, phase_bits=phase_bits)
+        W_hat[:, s, :] = Wh
+    return W_hat, int(bits_per * n_sb)
+
+
 def etype2_pmi_2d(W_sb: np.ndarray, n_tx: int, L: int = 4, M: int = 2,
                   oversampling: int = 4, amp_bits: int = 3, phase_bits: int = 3,
                   beta: float = 0.5, dual_pol: bool = False):
