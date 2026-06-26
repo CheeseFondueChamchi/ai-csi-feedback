@@ -382,6 +382,81 @@ print('(rank-2 median 0.723, rank-4 0.624 in TR; we model rank-1.)')
 """)
 
 # ---------------------------------------------------------------------------
+# Cell 6c — parameterized AI-vs-PMI bits sweep (pick any trained model)
+# ---------------------------------------------------------------------------
+md(r"""## AI encoder vs PMI — SGCS-vs-bits sweep (choose the model)
+
+`sweep_ai_vs_pmi(label, arch)` runs a **live** sweep: it loads a trained AI model,
+encodes the test channel, quantizes the latent at a range of bits/dim, decodes, and
+plots **AI SGCS-vs-feedback-bits** against the **PMI Type I/II** points on the same
+(wideband) axis. **Change `SWEEP_LABEL` / `SWEEP_ARCH` below and re-run the cell** to
+compare any trained model — the sweep recomputes for that model.
+""")
+
+code(r"""import torch
+
+def sweep_ai_vs_pmi(label, arch, ai_bits=(1, 2, 3, 4, 5, 6, 8), n_eval=2000, show=True):
+    '''Live AI(encode->quantize@b->decode) SGCS-vs-bits vs PMI Type I/II for one model.'''
+    ddir, tdir = csi.DATA_ROOT / label, csi.TRAINED_ROOT / label / arch
+    if not (ddir / 'test.npz').exists() or not (tdir / 'model.pt').exists():
+        print(f'  [missing] need data/{label} and models/trained/{label}/{arch}'); return None
+    ds = csi.load_dataset(ddir); reports = ds['reports']
+    Hte = ds['H_test'][:n_eval]; n_sub = Hte.shape[1]
+    W_true = np.asarray(reports['W_true'])[:n_eval]
+    m = json.loads((tdir / 'metrics.json').read_text())
+    N_DELAY, M = int(m.get('n_delay', 32)), int(m['n_code'])
+    mu, sdv = float(m['standardizer']['mu']), float(m['standardizer']['sd'])
+    # reconstruct + load the trained model
+    araw = json.loads((csi.RAW_ROOT / arch / 'arch.json').read_text())
+    net = getattr(csi, araw['class'])(**araw['kwargs'])
+    net.load_state_dict(torch.load(tdir / 'model.pt', map_location='cpu')); net.eval()
+    # encode test latents, fit the latent quantizer on them, sweep bits/dim
+    Xtn = (csi.complex_to_real_imag(csi.to_angular_delay(Hte, N_DELAY)) - mu) / sdv
+    with torch.no_grad():
+        zte = net.encode(torch.tensor(Xtn)).cpu().numpy()
+    lq = csi.LatentQuantizer().fit(zte)
+    ai = []
+    for b in ai_bits:
+        with torch.no_grad():
+            yq = net.decode(torch.tensor(lq.transform(zte, b))).cpu().numpy()
+        Hq = csi.from_angular_delay(csi.real_imag_to_complex(yq * sdv + mu), n_sub)
+        ai.append((int(M * b), float(csi.sgcs(W_true, csi.dominant_eigenvector(Hq)))))
+    # PMI Type I/II points (wideband, from reports)
+    fam = [str(f) for f in reports.get('pmi_family', [])]
+    pb = [int(x) for x in reports.get('pmi_bits', [])]
+    ps = [float(x) for x in reports.get('pmi_sgcs', [])]
+    pmi = sorted((b, s) for f, b, s in zip(fam, pb, ps))
+    if show:
+        fig, ax = plt.subplots(figsize=(7.6, 5))
+        ax.plot([x[0] for x in ai], [x[1] for x in ai], 'o-', color='#4C9BE8',
+                lw=1.9, ms=6, label=f'AI: {arch}')
+        if pmi:
+            ax.plot([x[0] for x in pmi], [x[1] for x in pmi], '^-', color='#E06C3A',
+                    lw=1.7, ms=7, label='PMI Type I/II')
+        if not np.isnan(reports.get('sgcs_trunc', np.nan)):
+            ax.axhline(float(reports['sgcs_trunc']), ls=':', color='#27AE60',
+                       label=f'truncation ref ({float(reports["sgcs_trunc"]):.3f})')
+        ax.set_xscale('log')
+        ax.set(xlabel='feedback report length (bits)', ylabel='SGCS (wideband)',
+               title=f'AI vs PMI — {LABEL_DISPLAY.get(label, label)} / {arch} (M={M})')
+        ax.legend(); plt.tight_layout(); plt.show()
+    return dict(ai=ai, pmi=pmi)
+
+# ── pick the model to compare (auto-default to an available one) ────────────
+_AVAIL = sorted((p.parent.parent.name, p.parent.name)
+                for p in csi.TRAINED_ROOT.glob('*/*/metrics.json'))
+print('available trained (label, arch):', _AVAIL)
+SWEEP_LABEL, SWEEP_ARCH = (_AVAIL[0] if _AVAIL else ('cdlc_3p5ghz', 'csinet64'))
+# e.g. set SWEEP_LABEL, SWEEP_ARCH = 'cdlc_3p5ghz', 'transnet64'
+print(f'sweeping: {SWEEP_LABEL} / {SWEEP_ARCH}')
+res = sweep_ai_vs_pmi(SWEEP_LABEL, SWEEP_ARCH)
+if res:
+    print('AI (bits, SGCS):', [(b, round(s, 3)) for b, s in res['ai']])
+    print('PMI (bits, SGCS):', [(b, round(s, 3)) for b, s in res['pmi']])
+""")
+
+
+# ---------------------------------------------------------------------------
 # Cell 7 — Narrative
 # ---------------------------------------------------------------------------
 md(r"""## Reading the Comparison
