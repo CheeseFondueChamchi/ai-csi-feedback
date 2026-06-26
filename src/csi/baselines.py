@@ -341,13 +341,25 @@ def etype2_pmi_2d(W_sb: np.ndarray, n_tx: int, L: int = 4, M: int = 2,
         P = W_sb[i].T                                  # (n_tx, n_sb)
         # Split ports into polarization groups [pol-0 | pol-1] (3GPP port layout).
         Pp = [P[p * n_sp:(p + 1) * n_sp] for p in range(n_pol)]   # 편파별 (n_sp, n_sb)
-        # 1) Shared spatial beams W1: top-L beams by power summed over BOTH pols
-        #    and all subbands (the L beams are shared across polarizations, §5.2.2.2.5).
+        # 1) Shared spatial beams W1 (shared across both pols, TS 38.214 §5.2.2.2.5).
+        #    Rel-16 requires the L beams to come from ONE *orthogonal* DFT subset, not
+        #    the L globally-strongest oversampled beams: adjacent oversampled columns
+        #    overlap (|<b,b'>| ~ 0.9), which double-counts power (captured fraction can
+        #    exceed 1) and collapses the W1^H projection. The orthogonal subset for
+        #    oversampling rotation q is columns {q, q+O, q+2O, ...}; pick the rotation
+        #    whose top-L beams capture the most power.
+        beam_pow = np.zeros(K)
         with np.errstate(all="ignore"):
-            beam_pow = sum(np.sum(np.abs(B.conj().T @ Pp[p]) ** 2, axis=1)
-                           for p in range(n_pol))      # (K,) per-beam power
-        s_sel = np.argsort(beam_pow)[-L:]              # indices of L strongest beams
-        W1 = B[:, s_sel]                               # (n_sp, L) shared spatial basis
+            for p in range(n_pol):
+                beam_pow += np.sum(np.abs(B.conj().T @ Pp[p]) ** 2, axis=1)  # (K,) per-beam power
+        s_sel, best_pw = np.arange(L), -1.0   # placeholder; loop always runs (O>=1)
+        for q in range(oversampling):
+            cols = np.arange(q, K, oversampling)       # one orthogonal DFT subset (n_sp beams)
+            sub = cols[np.argsort(beam_pow[cols])[-L:]]   # top-L within this rotation
+            pw = float(beam_pow[sub].sum())
+            if pw > best_pw:
+                best_pw, s_sel = pw, sub
+        W1 = B[:, s_sel]                               # (n_sp, L) orthogonal shared basis
         # 2) Per-pol beam-space channel A_p = W1^H P_p (project onto the L beams).
         with np.errstate(all="ignore"):
             A = [W1.conj().T @ Pp[p] for p in range(n_pol)]   # each (L, n_sb)
@@ -396,7 +408,11 @@ def etype2_pmi_2d(W_sb: np.ndarray, n_tx: int, L: int = 4, M: int = 2,
     #      strongest   : index of the reference (strongest) coefficient
     #      coeff_bits  : (K0-1) amplitude+phase words (reference costs no amp/phase)
     from math import comb, log2, ceil
-    beam_bits = int(ceil(log2(comb(K, L)))) if comb(K, L) > 1 else 0
+    # beam cost: choose L from one orthogonal subset of n_orth = K/O beams, plus
+    # log2(O) bits to signal which oversampling rotation (q1/q2) the subset uses.
+    n_orth = K // oversampling
+    beam_bits = ((int(ceil(log2(comb(n_orth, L)))) if comb(n_orth, L) > 1 else 0)
+                 + (int(ceil(log2(oversampling))) if oversampling > 1 else 0))
     freq_bits = int(ceil(log2(comb(n_sb, M)))) if M < n_sb else 0
     bitmap_bits = n_coeff                              # one bit per coefficient in the grid
     strongest_bits = int(ceil(log2(K0))) if K0 > 1 else 0
