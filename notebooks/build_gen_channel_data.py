@@ -319,6 +319,39 @@ assert all_ok, 'channel verification failed — generated data does not match TR
 """)
 
 
+# ── Cell 7a: full per-cluster table (every column, vs generator) ─────────────
+md(r"""## Verification — full cluster table
+
+The exact TR 38.901 §7.7.1 cluster parameters the generator uses — **every column**:
+**Normalized delay · Power [dB] · AOD [°] · AOA [°] · ZOD [°] · ZOA [°]** (plus the cluster
+spreads cASD/cASA/cZSD/cZSA and XPR). The `Δ vs gen` row confirms the generator's bundled
+table equals these reference values **exactly** (max\|Δ\| = 0) for each column.
+""")
+
+code(r"""import pandas as pd
+
+_COLS = [('delays', 'Norm. delay'), ('powers', 'Power [dB]'), ('aod', 'AOD [°]'),
+         ('aoa', 'AOA [°]'), ('zod', 'ZOD [°]'), ('zoa', 'ZOA [°]')]
+
+for cfg in [c for c in CONFIGS if c.data_source == 'sionna']:
+    model = cfg.channel_model
+    ref = csi.cdl_reference(model)                       # TR 38.901 reference table
+    tab = csi.verify_cdl_table(model)                    # exact match check vs generator
+    df = pd.DataFrame({name: ref[key] for key, name in _COLS})
+    df.index = [f'cluster {i+1}' for i in range(len(df))]
+    print(f'\n=== {model} — TR 38.901 §7.7.1 cluster table '
+          f'({ref["num_clusters"]} clusters, {"LOS" if ref["los"] else "NLOS"}) ===')
+    print(f'    cASD={ref["cASD"]}°  cASA={ref["cASA"]}°  cZSD={ref["cZSD"]}°  '
+          f'cZSA={ref["cZSA"]}°  XPR={ref["xpr"]} dB')
+    display(df)
+    # per-column exact-match vs the generator's bundled table
+    match = {name: f'{tab["fields"][key]["max_abs_err"]:.0e} '
+                   f'{"OK" if tab["fields"][key]["ok"] else "FAIL"}'
+             for key, name in _COLS}
+    print('  Δ vs generator (max|Δ| per column):', match)
+""")
+
+
 # ── Cell 7b: verification figure ─────────────────────────────────────────────
 md(r"""## Verification — figure
 
