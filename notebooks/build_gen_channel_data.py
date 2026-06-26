@@ -458,6 +458,71 @@ plt.tight_layout(); plt.show()
 """)
 
 
+# ── Cell 9b: eType II PMI verification across fixed bit budgets ───────────────
+md(r"""## eType II PMI verification — SGCS at fixed feedback-bit budgets
+
+Is our `etype2_pmi_2d` *right*? For each CDL profile we build the eType II SGCS-vs-bits
+**Pareto curve** (best SGCS over an (L, M, β) grid) and read off the SGCS achievable at
+fixed budgets **32 / 64 / 128 / 256 / 512 bits**, then compare to the 3GPP/RAN1 reported
+eType II baseline (≈0.90 @ 300 bits, UMa / 32-port / rank-1 / 4 Rx).
+
+A correct codebook should give a **monotonically rising** SGCS with more bits, and reach
+the reported range at high budgets (LOS profiles near it, rich-NLOS a bit below — ours is
+the stricter per-subband metric on a harder single-Rx CDL link).
+""")
+
+code(r"""import matplotlib.pyplot as plt
+
+BUDGETS = [32, 64, 128, 256, 512]
+GRID = [(L, M, beta) for L in (2, 4, 6) for M in (1, 2, 4, 7)
+        for beta in (0.25, 0.5, 1.0)]
+N_EVAL = 400                                   # test-sample subset (fast, representative)
+
+rows, curves = [], {}
+for cfg in [c for c in CONFIGS if c.data_source in ('sionna', 'mixed')]:
+    W_sb = csi.subband_precoders(
+        csi.load_dataset(csi.dataset_dir(cfg))['H_test'][:N_EVAL], 13)
+    pts = []
+    for L, M, beta in GRID:
+        W_hat, b = csi.etype2_pmi_2d(W_sb, cfg.gnb_tx, L=L, M=M, beta=beta,
+                                     dual_pol=bool(cfg.dual_pol))
+        pts.append((int(b), float(csi.sgcs_subband(W_sb, W_hat))))
+    pts.sort()
+    curves[cfg.channel_model] = pts
+    # best SGCS achievable within each bit budget (Pareto floor)
+    row = {'profile': cfg.channel_model}
+    for B in BUDGETS:
+        cand = [s for b, s in pts if b <= B]
+        row[f'{B}b'] = round(max(cand), 3) if cand else float('nan')
+    rows.append(row)
+
+import pandas as pd
+df = pd.DataFrame(rows).set_index('profile')
+print('eType II SGCS at fixed bit budgets (per-subband, CDL):')
+display(df)
+mono = all(df.iloc[i].dropna().is_monotonic_increasing for i in range(len(df)))
+print('monotone SGCS-vs-budget:', 'OK ✅' if mono else 'CHECK ❌',
+      '| reported eType II baseline ~0.90 @ 300b (UMa, 4 Rx)')
+
+# figure: Pareto curves + budget gridlines + reported baseline
+fig, ax = plt.subplots(figsize=(8.5, 5))
+for model, pts in curves.items():
+    bx = sorted({b for b, _ in pts})
+    paretoy = [max(s for b, s in pts if b <= X) for X in bx]
+    ax.plot(bx, paretoy, 'o-', ms=4, lw=1.6, label=model)
+for B in BUDGETS:
+    ax.axvline(B, ls=':', color='gray', alpha=0.5)
+ax.scatter([300], [0.9042], marker='*', s=240, color='red', zorder=6,
+           label='reported eType II (0.904@300b)')
+ax.axhspan(0.917, 0.954, color='red', alpha=0.06)
+ax.set_xscale('log')
+ax.set(xlabel='feedback report length (bits)', ylabel='eType II SGCS (per-subband)',
+       ylim=(0.2, 1.0), title='eType II PMI verification — SGCS vs bit budget vs 3GPP baseline')
+ax.set_xticks(BUDGETS); ax.set_xticklabels([str(b) for b in BUDGETS])
+ax.legend(fontsize=8); plt.tight_layout(); plt.show()
+""")
+
+
 # ── Cell 10: directory layout note ───────────────────────────────────────────
 md(r"""## Per-config directory layout
 
