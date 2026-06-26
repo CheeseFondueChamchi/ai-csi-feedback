@@ -147,6 +147,10 @@ class ChannelConfig:
     #   per-sample CSI; >1 adds a time axis sampled at csi_report_rate_hz(),
     #   letting the channel evolve under the ue_speed Doppler.
     num_time_steps: int = 1         # snapshots per realization; >1 -> time axis
+    # lsp_variation : turn on MILD per-sample large-scale-parameter variation
+    #   (TR 38.901 7.5): log-normal delay spread + small tilt + cluster jitter.
+    #   False -> the strict, deterministic CDL table (default).
+    lsp_variation: bool = False
 
     # --- Dataset identity -----------------------------------------------------
     # channel_label : str. Explicit on-disk directory slug. If empty, to_dirname()
@@ -314,6 +318,7 @@ class ChannelConfig:
             max_speed=self.ue_speed,
             num_time_steps=self.num_time_steps,
             time_sampling_frequency=self.csi_report_rate_hz(),
+            lsp_variation=self.lsp_variation,
             seed=self.seed,
         )
 

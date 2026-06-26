@@ -98,6 +98,13 @@ New TR-38.843 knobs used here:
 code(r"""# Number of delay taps kept in the angular-delay representation.
 N_DELAY = 32
 
+# ── SWITCH: mild per-sample channel variation (TR 38.901 §7.5) ──────────────
+# False -> strict deterministic CDL table (identical clusters every sample).
+# True  -> add MILD per-sample variation: log-normal delay spread, small BS
+#          tilt, and per-cluster delay/power jitter. One flag, applied to all
+#          CDL configs below. Flip and re-run to regenerate with diversity.
+LSP_VARIATION = False
+
 # ---------------------------------------------------------------------------
 # TR 38.843 channel configurations (CDL-A/C/E + synthetic).
 # Shared grid: 3.5 GHz / 30 kHz / 51 RB = 612 subcarriers / 32 TX / dual-pol.
@@ -110,7 +117,7 @@ def _cdl(model, label, delay_spread, ue_speed=0.5):
         carrier_frequency=3.5e9, bandwidth=20e6, scs=30e3, rb=51, nfu=612,
         gnb_tx=32, ue_rx=1, max_rank=1, dual_pol=True,
         delay_spread=delay_spread, ue_speed=ue_speed,
-        snr_db=20.0, pathloss_db=0.0,
+        snr_db=20.0, pathloss_db=0.0, lsp_variation=LSP_VARIATION,
         n_orient=16, n_train=25000, n_test=5000, seed=0,
         channel_label=label,
     )
@@ -125,7 +132,7 @@ CONFIGS = [
         channel_model='CDL-MIX', data_source='mixed', mix_models='CDL-A,CDL-C,CDL-E',
         carrier_frequency=3.5e9, bandwidth=20e6, scs=30e3, rb=51, nfu=612,
         gnb_tx=32, ue_rx=1, max_rank=1, dual_pol=True, ue_speed=0.5,
-        snr_db=20.0, pathloss_db=0.0,
+        snr_db=20.0, pathloss_db=0.0, lsp_variation=LSP_VARIATION,
         n_orient=16, n_train=25000, n_test=5000, seed=0, channel_label='mixed_cdl_ace',
     ),
     # Synthetic beam-like — pure-NumPy DFT-sparse model

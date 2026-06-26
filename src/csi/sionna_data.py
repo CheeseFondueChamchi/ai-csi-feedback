@@ -75,6 +75,7 @@ def generate_sionna_csi(
     max_speed: float = 0.0,
     num_time_steps: int = 1,
     time_sampling_frequency: float | None = None,
+    lsp_variation: bool = False,
     seed: int | None = 0,
     batch: int = 250,
 ) -> np.ndarray:
@@ -202,18 +203,40 @@ def generate_sionna_csi(
     # acts like placing the UE at a different bearing relative to the panel.
     per = int(np.ceil(n_samples / n_orient))
     filled = 0
+    vrng = np.random.default_rng((0 if seed is None else int(seed)) + 777)   # variation rng
     for _ in range(n_orient):
         if filled >= n_samples:
             break
         az = float(rng.uniform(-np.pi, np.pi))      # random BS azimuth in [-pi, pi)
+        # OPTIONAL mild large-scale-parameter variation (TR 38.901 §7.5). CDL is
+        # otherwise a fixed deterministic table (identical clusters every sample);
+        # turning this on re-introduces realistic per-sample diversity: a log-normal
+        # delay spread (sigma 0.2 in log10 -> ~1.6x range), a small random down-tilt/
+        # slant, and a mild per-cluster delay/power jitter (~5% / ~0.5 dB).
+        if lsp_variation:
+            ds_use = float(delay_spread) * float(10.0 ** (0.2 * vrng.standard_normal()))
+            tilt = [float(vrng.uniform(-0.1, 0.1)), float(vrng.uniform(-0.1, 0.1))]
+        else:
+            ds_use, tilt = float(delay_spread), [0.0, 0.0]
         bs = AntennaArray(antenna_pattern="38.901",
                           carrier_frequency=carrier_frequency, **bs_kwargs)
         # CDL channel: downlink (gNB->UE). ``bs_orientation=[azimuth, down-tilt,
         # slant]`` rotates the panel; ``max_speed`` sets the max Doppler (the
         # per-realization velocity is drawn in [min_speed, max_speed] internally).
-        cdl = CDL(model, delay_spread, carrier_frequency, ut, bs,
+        cdl = CDL(model, ds_use, carrier_frequency, ut, bs,
                   direction="downlink", max_speed=max_speed,
-                  bs_orientation=[az, 0.0, 0.0])
+                  bs_orientation=[az] + tilt)
+        if lsp_variation:                            # mild per-cluster delay/power jitter
+            try:
+                import tensorflow as tf
+                d = cdl._delays
+                cdl._delays = d * tf.constant(
+                    (1.0 + 0.05 * vrng.standard_normal(tuple(d.shape))).astype("float32"), d.dtype)
+                p = cdl._powers
+                cdl._powers = p * tf.constant(
+                    (10.0 ** (0.05 * vrng.standard_normal(tuple(p.shape)))).astype("float32"), p.dtype)
+            except Exception:
+                pass
         need = min(per, n_samples - filled)         # samples for this orientation
         got = 0
         while got < need:
