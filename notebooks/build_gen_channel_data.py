@@ -153,78 +153,16 @@ for cfg in CONFIGS:
 
 
 # ── Cell 5: build_reports function ──────────────────────────────────────────
-code(r"""def build_reports(H_test, n_tx, n_delay, snr_db, seed=0, dual_pol=False):
-    # Per-test-sample PMI metrics under NOISY CSI estimation.
-    #
-    # Realistic chain: the UE estimates a noisy channel Hhat = H + AWGN at
-    # `snr_db`, derives its precoder from Hhat, and reports a PMI. We score every
-    # reported precoder against the TRUE eigenvector of the clean H, so the SGCS
-    # reflects estimation error AND codebook quantization (not quantization alone).
-    rng = np.random.default_rng(1234 + seed)
-    reports = {}
+code(r"""# build_reports lives in the csi package (csi.reports.build_reports) so the SAME
+# logic builds reports here and in the report-refresh tool — it never drifts.
+# It computes: noisy-estimate PMI (Type I/II wideband) + true Rel-16 eType II 2D
+# (per-subband) + the UNIFIED per-subband track (sb_*: Type I/II SB + eType II 2D,
+# all on sgcs_subband). We pass the spawn-pool `pmap` for parallel codebook eval.
+def build_reports(H_test, n_tx, n_delay, snr_db, seed=0, dual_pol=False):
+    return csi.build_reports(H_test, n_tx, n_delay, snr_db, seed=seed,
+                             dual_pol=dual_pol, codebook_map=pmap)
 
-    # ── ground-truth precoder from the CLEAN channel ─────────────────────
-    W_true = csi.dominant_eigenvector(H_test).astype(np.complex64)
-    reports['W_true'] = W_true
-
-    # ── noisy estimate the UE actually sees ──────────────────────────────
-    H_est = csi.add_awgn(H_test, snr_db, rng)
-    W_est = csi.dominant_eigenvector(H_est).astype(np.complex64)
-    # estimation-only reference (no codebook): how good is the raw noisy precoder
-    reports['sgcs_estimation'] = np.float64(csi.sgcs(W_true, W_est))
-    reports['snr_db'] = np.float64(snr_db)
-
-    # ── delay-truncation reference (near-lossless, on clean H) ───────────
-    H_ad  = csi.to_angular_delay(H_test, n_delay)
-    H_tr  = csi.from_angular_delay(H_ad, H_test.shape[1])
-    reports['sgcs_trunc'] = np.float64(csi.sgcs(W_true, csi.dominant_eigenvector(H_tr)))
-    reports['n_delay']    = np.int64(n_delay)
-
-    # ── PMI reported from the NOISY precoder W_est ───────────────────────
-    # Legacy codebooks: Type I (single beam) + Type II (L-beam linear combo).
-    type1_W, type1_bits = csi.type1_pmi(W_est, n_tx)
-    reports['type1_W'] = type1_W.astype(np.complex64)
-    reports['type1_bits'] = int(type1_bits)
-    for L in [2, 3, 4, 6]:
-        W_hat, bits = pmap(csi.type2_pmi, W_est, n_tx=n_tx, L=L)
-        reports[f'type2_L{L}_W'] = W_hat.astype(np.complex64)
-        reports[f'type2_L{L}_bits'] = int(bits)
-    # ── aligned wideband summary arrays (Type I/II, scored vs CLEAN W_true) ──
-    scheme_names = ['Type I'] + [f'Type II L={L}' for L in [2, 3, 4, 6]]
-    scheme_W     = [reports['type1_W']] + [reports[f'type2_L{L}_W'] for L in [2, 3, 4, 6]]
-    scheme_bits  = [reports['type1_bits']] + [reports[f'type2_L{L}_bits'] for L in [2, 3, 4, 6]]
-    reports['pmi_schemes'] = np.array(scheme_names)
-    reports['pmi_family']  = np.array(['Type I'] + ['Type II'] * 4)
-    reports['pmi_bits']    = np.array(scheme_bits, dtype=int)
-    reports['pmi_sgcs']    = np.array([float(csi.sgcs(W_true, W)) for W in scheme_W],
-                                      dtype=np.float64)
-
-    # ── True Rel-16 eType II: spatial-frequency 2D, evaluated PER-SUBBAND ─────
-    # Separate track with its OWN metric basis (per-subband precoders, mean SGCS
-    # across subbands). Uses the noisy estimate for the report, scored against the
-    # clean per-subband precoders. Sweeps spatial L and frequency M.
-    N_SB = 13
-    W_sb_true = csi.subband_precoders(H_test, N_SB)   # clean ground truth
-    W_sb_est  = csi.subband_precoders(H_est,  N_SB)   # noisy estimate the UE sees
-    # Rel-16 K0 truncation: only ceil(beta*L*M) strongest coeffs reported (+ bitmap).
-    E2D_BETA = 0.5
-    reports['n_subband'] = np.int64(N_SB)
-    reports['etype2_2d_beta'] = np.float64(E2D_BETA)
-    reports['sgcs_subband_estimation'] = np.float64(csi.sgcs_subband(W_sb_true, W_sb_est))
-    e2d_names, e2d_bits, e2d_sgcs = [], [], []
-    for (L, M) in [(4, 1), (4, 2), (4, 4), (6, 2), (6, 4), (6, 7)]:
-        W_hat_sb, bits = pmap(csi.etype2_pmi_2d, W_sb_est, n_tx=n_tx, L=L, M=M,
-                              beta=E2D_BETA, dual_pol=dual_pol)
-        e2d_names.append(f'eType2D L={L} M={M}')
-        e2d_bits.append(int(bits))
-        e2d_sgcs.append(float(csi.sgcs_subband(W_sb_true, W_hat_sb)))
-    reports['etype2_2d_schemes'] = np.array(e2d_names)
-    reports['etype2_2d_bits']    = np.array(e2d_bits, dtype=int)
-    reports['etype2_2d_sgcs']    = np.array(e2d_sgcs, dtype=np.float64)
-    return reports
-
-
-print('build_reports() defined (noisy CSI estimation)')
+print('build_reports -> csi.reports.build_reports (parallel via pmap)')
 """)
 
 
