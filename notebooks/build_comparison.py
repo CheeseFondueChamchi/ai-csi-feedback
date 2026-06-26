@@ -68,7 +68,7 @@ print('csi.TRAINED_ROOT:', csi.TRAINED_ROOT)
 # ---------------------------------------------------------------------------
 # Cell 3 — LABELS and loader
 # ---------------------------------------------------------------------------
-code(r"""LABELS = ['cdlc_3p5ghz', 'synthetic_beam']
+code(r"""LABELS = ['cdlc_3p5ghz', 'mixed_cdl_ace', 'synthetic_beam']
 
 
 def _family_of(arch_class, arch_name):

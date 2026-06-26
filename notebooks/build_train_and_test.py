@@ -35,9 +35,9 @@ print('device:', DEVICE)""")
 # 3. Config constants + helper functions (ALL in one cell)
 # ---------------------------------------------------------------------------
 code(r'''# ── constants ───────────────────────────────────────────────────────────────
-# Two model families (CsiNet legacy vs TransNet) at matched M, on the canonical
-# CDL-C-vs-synthetic pair used by the comparison's two-panel figure.
-LABELS   = ['cdlc_3p5ghz', 'synthetic_beam']
+# Two model families (CsiNet legacy vs TransNet) at matched M, trained on CDL-C,
+# the mixed CDL-A/C/E generalization set, and the synthetic channel.
+LABELS   = ['cdlc_3p5ghz', 'mixed_cdl_ace', 'synthetic_beam']
 ARCHS    = ['csinet16', 'csinet32', 'csinet64',
             'transnet16', 'transnet32', 'transnet64']
 EPOCHS   = 30
@@ -142,7 +142,7 @@ print('config + helpers ready')''')
 # ---------------------------------------------------------------------------
 # 4. ONE code cell per (label, arch) pair  — 6 cells total
 # ---------------------------------------------------------------------------
-LABELS = ['cdlc_3p5ghz', 'synthetic_beam']
+LABELS = ['cdlc_3p5ghz', 'mixed_cdl_ace', 'synthetic_beam']
 ARCHS  = ['csinet16', 'csinet32', 'csinet64',
           'transnet16', 'transnet32', 'transnet64']
 
@@ -155,10 +155,10 @@ for label in LABELS:
 # ---------------------------------------------------------------------------
 md(r"""## Verification
 
-Assert every `metrics.json` exists for all 6 (label × arch) pairs.""")
+Assert every `metrics.json` exists for all (label × arch) pairs.""")
 
-code(r"""# Verify all 6 trained artefacts exist
-LABELS = ['cdlc_3p5ghz', 'synthetic_beam']
+code(r"""# Verify all trained artefacts exist
+LABELS = ['cdlc_3p5ghz', 'mixed_cdl_ace', 'synthetic_beam']
 ARCHS  = ['csinet16', 'csinet32', 'csinet64',
           'transnet16', 'transnet32', 'transnet64']
 

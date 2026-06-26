@@ -337,3 +337,92 @@ def generate_sionna_csi_parallel(n_jobs: int = 4, **kwargs) -> np.ndarray:
         # ex.map preserves task order, so concatenation order is deterministic.
         chunks = list(ex.map(_gen_worker, tasks))
     return np.concatenate(chunks, axis=0)
+
+
+# ===========================================================================
+# Mixed-profile dataset (for cross-CDL generalization)
+# ===========================================================================
+# Profile-typical RMS delay spreads [s] used when delay_spreads is not given.
+# TR 38.901 §7.7.1 fixes the *normalized* cluster delays; the absolute DS is a
+# free scaling knob (§7.7.3), so these are representative values, not mandated.
+_DEFAULT_DS = {"A": 100e-9, "B": 100e-9, "C": 300e-9, "D": 30e-9, "E": 100e-9}
+
+
+def generate_sionna_csi_mixed(models, n_samples, delay_spreads=None,
+                              n_jobs: int = 1, seed: int = 0, **kwargs) -> np.ndarray:
+    """Generate ONE dataset that mixes several TR 38.901 CDL profiles.
+
+    Motivation (TR 38.843 generalization)
+    -------------------------------------
+    A model trained on a single CDL profile overfits that channel's geometry. A
+    *mixed* dataset — samples drawn from CDL-A (rich NLOS), CDL-C (NLOS) and
+    CDL-E (LOS) — exercises the generalization the Rel-18 study calls for: one
+    encoder/decoder (or codebook) that works across channel conditions instead
+    of one model per scenario.
+
+    How it works
+    ------------
+    ``n_samples`` is split as evenly as possible across the listed profiles;
+    each chunk is generated with that profile's delay spread and a distinct
+    seed, then all chunks are concatenated and **shuffled** (with ``seed``) so a
+    later train/test split mixes profiles uniformly. CDL cluster angles are
+    fixed per profile, so the per-profile ``n_orient`` BS-orientation diversity
+    (see ``generate_sionna_csi``) still applies within each chunk.
+
+    Parameters
+    ----------
+    models : list of CDL profiles, e.g. ['A','C','E'] or ['CDL-A','CDL-C','CDL-E'].
+    n_samples : total samples across all profiles.
+    delay_spreads : per-profile RMS delay spread [s]; a scalar applied to all, a
+        list matching ``models``, or None to use profile-typical defaults
+        (A/E 100 ns, C 300 ns).
+    n_jobs : >1 uses the multiprocessing generator per profile.
+    seed : base seed (per-profile seeds derive from it; also seeds the shuffle).
+    **kwargs : shared generate_sionna_csi args (n_tx, n_sub, subcarrier_spacing,
+        carrier_frequency, n_orient, dual_pol, max_speed, ...). Do NOT pass
+        ``model`` / ``delay_spread`` / ``n_samples`` / ``seed`` here.
+
+    Returns
+    -------
+    H : complex64 (n_samples, n_sub, n_tx) — profiles interleaved and shuffled.
+
+    Example
+    -------
+        # FR1 n78, 32-port dual-pol, mix of A/C/E for a generalization-robust model
+        H = generate_sionna_csi_mixed(['A','C','E'], n_samples=30000, n_jobs=8,
+                                      n_tx=32, n_sub=612, subcarrier_spacing=30e3,
+                                      carrier_frequency=3.5e9, dual_pol=True)
+    """
+    letters = [str(m).upper().replace("CDL-", "") for m in models]
+    n_m = len(letters)
+    if n_m == 0:
+        raise ValueError("generate_sionna_csi_mixed: 'models' is empty")
+
+    # Resolve per-profile delay spreads.
+    if delay_spreads is None:
+        ds_list = [_DEFAULT_DS.get(m, 100e-9) for m in letters]
+    elif np.isscalar(delay_spreads):
+        ds_list = [float(delay_spreads)] * n_m
+    else:
+        ds_list = [float(d) for d in delay_spreads]
+        if len(ds_list) != n_m:
+            raise ValueError("delay_spreads length must match models")
+
+    # Even split of n_samples across profiles (remainder to the first profiles).
+    sizes = [n_samples // n_m + (1 if i < n_samples % n_m else 0) for i in range(n_m)]
+
+    parts = []
+    for i, (m, ds, sz) in enumerate(zip(letters, ds_list, sizes)):
+        if sz == 0:
+            continue
+        kw = dict(kwargs)
+        kw.update(n_samples=sz, model=m, delay_spread=ds, seed=seed + 100 * (i + 1))
+        if n_jobs > 1:
+            parts.append(generate_sionna_csi_parallel(n_jobs=n_jobs, **kw))
+        else:
+            parts.append(generate_sionna_csi(**kw))
+
+    H = np.concatenate(parts, axis=0)
+    # Shuffle so profiles are interleaved (train/test split then mixes them).
+    perm = np.random.default_rng(seed).permutation(len(H))
+    return H[perm]

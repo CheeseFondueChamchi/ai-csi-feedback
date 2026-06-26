@@ -101,7 +101,9 @@ from .baselines import (
     subband_precoders, sgcs_subband, etype2_pmi_2d,
 )
 # Sionna-based TR 38.901 data source (imports TensorFlow lazily, inside the call)
-from .sionna_data import generate_sionna_csi, generate_sionna_csi_parallel
+from .sionna_data import (
+    generate_sionna_csi, generate_sionna_csi_parallel, generate_sionna_csi_mixed,
+)
 # TR 38.901 CDL channel verification: reference per-cluster tables (normalized
 # delay / power[dB] / AOD / AOA / ZOD / ZOA from §7.7.1 — CDL-A Table 7.7.1-1,
 # CDL-C 7.7.1-3, CDL-E 7.7.1-5) and delay-spread scaling (§7.7.3), with checks
@@ -133,7 +135,7 @@ __all__ = [
     "Standardizer", "train_autoencoder", "LatentQuantizer",
     "dft_codebook", "type1_pmi", "type2_pmi",
     "subband_precoders", "sgcs_subband", "etype2_pmi_2d",
-    "generate_sionna_csi", "generate_sionna_csi_parallel",
+    "generate_sionna_csi", "generate_sionna_csi_parallel", "generate_sionna_csi_mixed",
     "CDL_TABLES", "cdl_reference", "verify_cdl_table", "verify_generated",
     "format_report", "add_awgn",
     "ChannelConfig", "save_dataset", "load_dataset", "dataset_dir",

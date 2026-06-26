@@ -119,6 +119,15 @@ CONFIGS = [
     _cdl('CDL-A', 'cdla_3p5ghz', 100e-9),   # NLOS, rich multipath
     _cdl('CDL-C', 'cdlc_3p5ghz', 300e-9),   # NLOS, moderate
     _cdl('CDL-E', 'cdle_3p5ghz', 100e-9),   # LOS, sparse
+    # MIXED CDL-A/C/E — equal blend, shuffled, for cross-profile generalization
+    # (a TR 38.843 generalization scenario: one model robust across channels).
+    csi.ChannelConfig(
+        channel_model='CDL-MIX', data_source='mixed', mix_models='CDL-A,CDL-C,CDL-E',
+        carrier_frequency=3.5e9, bandwidth=20e6, scs=30e3, rb=51, nfu=612,
+        gnb_tx=32, ue_rx=1, max_rank=1, dual_pol=True, ue_speed=0.5,
+        snr_db=20.0, pathloss_db=0.0,
+        n_orient=16, n_train=25000, n_test=5000, seed=0, channel_label='mixed_cdl_ace',
+    ),
     # Synthetic beam-like — pure-NumPy DFT-sparse model
     csi.ChannelConfig(
         channel_model='synthetic', data_source='synthetic',
@@ -221,6 +230,15 @@ code(r"""for cfg in CONFIGS:
     # ── generate raw channel matrix H ────────────────────────────────────
     if cfg.data_source == 'sionna':
         H = csi.generate_sionna_csi_parallel(n_jobs=N_JOBS, **cfg.sionna_kwargs())  # (n_total, n_sub, n_tx)
+    elif cfg.data_source == 'mixed':
+        # equal blend of the listed CDL profiles (per-profile default delay spread)
+        models = [m.strip() for m in cfg.mix_models.split(',') if m.strip()]
+        shared = cfg.sionna_kwargs()
+        for k in ('n_samples', 'model', 'delay_spread', 'seed'):
+            shared.pop(k, None)                          # set per-profile inside the mixer
+        H = csi.generate_sionna_csi_mixed(models, n_samples=n_total, n_jobs=N_JOBS,
+                                          seed=cfg.seed, **shared)
+        print(f'  mixed profiles: {models}')
     else:
         H = csi.generate_csi_dataset(n_samples=n_total, n_tx=cfg.gnb_tx,
                                      n_sub=cfg.n_sub(), rng=np.random.default_rng(cfg.seed))

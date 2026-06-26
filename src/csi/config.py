@@ -162,9 +162,16 @@ class ChannelConfig:
     csi_rs_periodicity: int = 20  # slots
 
     # --- Data source ----------------------------------------------------------
-    # data_source : str. "sionna" (TR 38.901 CDL via csi.sionna_data) or
-    #   "synthetic" (csi.data toy generator). Provenance only.
-    data_source: str = "sionna"  # "sionna" or "synthetic"
+    # data_source : str. "sionna" (TR 38.901 CDL via csi.sionna_data),
+    #   "synthetic" (csi.data toy generator), or "mixed" (a blend of several CDL
+    #   profiles via csi.generate_sionna_csi_mixed — for cross-CDL generalization,
+    #   a TR 38.843 evaluation scenario). Provenance only.
+    data_source: str = "sionna"  # "sionna" | "synthetic" | "mixed"
+    # mix_models : str. Used only when data_source="mixed": comma-separated CDL
+    #   profiles to blend, e.g. "CDL-A,CDL-C,CDL-E". Each contributes an equal
+    #   share of n_train+n_test with its profile-typical delay spread; samples are
+    #   shuffled so train/test mix the profiles. Empty for non-mixed datasets.
+    mix_models: str = ""
 
     # --- Split sizes ----------------------------------------------------------
     # n_train / n_test : count. Number of channel realizations in each split.
