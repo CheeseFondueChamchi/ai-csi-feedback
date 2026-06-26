@@ -222,9 +222,20 @@ print('build_reports() defined (noisy CSI estimation)')
 
 
 # ── Cell 6: main generation loop ─────────────────────────────────────────────
-code(r"""for cfg in CONFIGS:
+code(r"""# Set FORCE_REGEN=True to rebuild datasets that already exist on disk.
+# Default (False) makes this cell idempotent: existing datasets are skipped, so
+# re-running only fills in newly-added configs (e.g. the mixed CDL set) without
+# regenerating what is already there.
+FORCE_REGEN = False
+
+for cfg in CONFIGS:
     label = cfg.to_dirname()
     n_total = cfg.n_train + cfg.n_test
+    d = csi.dataset_dir(cfg)
+    if (not FORCE_REGEN and
+            all((d / f).exists() for f in ('train.npz', 'test.npz', 'reports.npz', 'config.json'))):
+        print(f'\n=== Skipping: {label} (already on disk; set FORCE_REGEN=True to rebuild) ===')
+        continue
     print(f'\n=== Generating: {label} ({cfg.channel_model}) ===')
 
     # ── generate raw channel matrix H ────────────────────────────────────
