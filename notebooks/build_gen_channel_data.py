@@ -322,73 +322,79 @@ assert all_ok, 'channel verification failed — generated data does not match TR
 # ── Cell 7b: verification figure ─────────────────────────────────────────────
 md(r"""## Verification — figure
 
-One row per CDL profile, three views of *why* the verification passes:
+One row per CDL profile. The two **data** panels use **N = 2000** test samples so the
+statistics are clean (not one noisy realization):
 
-| panel | what it shows | verification level |
+| panel | what it shows | level |
 |---|---|---|
-| **left** — delay–power profile | TR 38.901 §7.7.1 cluster stems with the **generator's own table** overlaid (`×`); they coincide → exact match | **config** |
-| **middle** — angular cluster map | each cluster at its (AOD, AOA), size ∝ power — the spatial structure the table prescribes | config |
-| **right** — power-delay profile | **empirical PDP from `H`** (bars) vs the table binned onto the OFDM delay grid (line) | **data** |
+| **left — delay–power profile** | TR 38.901 §7.7.1 cluster stems with the **generator's own table** overlaid (`×`); they coincide → exact match | **config** |
+| **middle — power-delay profile** | **empirical PDP from H** (bars, 2000 samples) vs the table binned onto the OFDM delay grid (red line). Energy concentrates on the table's clusters → the realized delays match the standard | **data** |
+| **right — spatial eigenvalues** | normalized, sorted eigenvalues of the **measured** spatial covariance (log scale, 2000 samples). **Steep drop → low-rank / line-of-sight** (CDL-E); **flat tail → rich multipath** (CDL-A/C). Orientation-invariant, so it cleanly separates the profiles | **data** |
 
-Config-level is an exact (max\|Δ\|=0) table comparison; data-level is consistent up to the
-OFDM delay resolution `1/(n_sub·scs)`.
+(The per-cluster AOD/AOA *angles* are verified numerically by `verify_cdl_table` — they
+can't be recovered from a single-Rx H, so they're not plotted; the eigenvalue spectrum is
+the spatial-richness view that the samples *can* prove.)
 """)
 
 code(r"""import matplotlib.pyplot as plt
 
+N_SAMP = 2000                       # enough test samples for clean empirical statistics
 sionna_cfgs = [c for c in CONFIGS if c.data_source == 'sionna']
 nrows = len(sionna_cfgs)
 fig, axes = plt.subplots(nrows, 3, figsize=(15, 3.7 * nrows), squeeze=False)
 
 for i, cfg in enumerate(sionna_cfgs):
     model = cfg.channel_model
-    ref = csi.cdl_reference(model)
-    tab = csi.verify_cdl_table(model)
+    ref = csi.cdl_reference(model); tab = csi.verify_cdl_table(model)
     tau_ns = np.asarray(ref['delays']) * cfg.delay_spread * 1e9     # cluster delays [ns]
-    pw_db  = np.asarray(ref['powers'])                             # cluster powers [dB]
-    pw_lin = 10 ** (pw_db / 10); pw_lin /= pw_lin.max()
-    aod, aoa = np.asarray(ref['aod']), np.asarray(ref['aoa'])
+    pw_db  = np.asarray(ref['powers']); pw_lin = 10 ** (pw_db / 10); pw_lin /= pw_lin.max()
+    Hte = csi.load_dataset(csi.dataset_dir(cfg))['H_test'][:N_SAMP]
+    n_sub, n_tx = Hte.shape[1], Hte.shape[2]
+    gen = csi.verify_generated(Hte, model, delay_spread=cfg.delay_spread, scs=cfg.scs)
 
     # --- left: config-level delay-power match (TR table vs generator table) ---
     ax = axes[i][0]
     ax.stem(tau_ns, pw_db, linefmt='C3-', markerfmt='C3o', basefmt=' ', label='TR 38.901 table')
-    try:                                                            # overlay the generator's bundled table
+    try:
         son = csi.verify._load_sionna_table(model)
         ax.plot(np.asarray(son['delays']) * cfg.delay_spread * 1e9, son['powers'],
                 'kx', ms=7, mew=1.5, label='generator table')
     except Exception:
         pass
     ax.set(xlabel='delay (ns)', ylabel='cluster power (dB)', ylim=(min(pw_db) - 3, 3))
-    ax.set_title(f'{model}  ·  config-level {"PASS" if tab["ok"] else "FAIL"} (max|Δ|=0)', fontsize=10)
+    ax.set_title(f'{model}  ·  config {"PASS" if tab["ok"] else "FAIL"} (max|Δ|=0)', fontsize=10)
     ax.legend(fontsize=7)
 
-    # --- middle: angular cluster map (AOD vs AOA, size ∝ power) ---
+    # --- middle: data-level empirical PDP vs table (N_SAMP samples) ---
     ax = axes[i][1]
-    sc = ax.scatter(aod, aoa, s=20 + 220 * pw_lin, c=pw_db, cmap='viridis',
-                    alpha=0.85, edgecolor='k', linewidth=0.3)
-    ax.set(xlabel='AOD (deg)', ylabel='AOA (deg)', xlim=(-185, 185), ylim=(-185, 185))
-    ax.set_title(f'{model}  ·  {ref["num_clusters"]} clusters (size ∝ power)', fontsize=10)
-    fig.colorbar(sc, ax=ax, label='power (dB)', fraction=0.046)
-
-    # --- right: data-level empirical vs table PDP ---
-    ax = axes[i][2]
-    Hte = csi.load_dataset(csi.dataset_dir(cfg))['H_test'][:500]
-    gen = csi.verify_generated(Hte, model, delay_spread=cfg.delay_spread, scs=cfg.scs)
-    n_sub = Hte.shape[1]; bin_ns = 1e9 / (n_sub * cfg.scs)
+    bin_ns = 1e9 / (n_sub * cfg.scs)
     pdp = np.mean(np.abs(np.fft.ifft(Hte, axis=1)) ** 2, axis=(0, 2)); pdp /= pdp.sum()
     theo = np.zeros(n_sub)
     for t, p in zip(tau_ns / bin_ns, pw_lin / pw_lin.sum()):
         theo[int(round(t)) % n_sub] += p
-    win = min(n_sub, int(tau_ns.max() / bin_ns) + 6)
-    x = np.arange(win) * bin_ns
-    ax.bar(x, pdp[:win], width=bin_ns * 0.9, color='#4C9BE8', alpha=0.6, label='empirical (H)')
-    ax.plot(x, theo[:win], 'C3o-', ms=3, lw=1, label='TR table (binned)')
-    ax.set(xlabel='delay (ns)', ylabel='norm. power')
-    ax.set_title(f'{model}  ·  data-level {"PASS" if gen["ok"] else "FAIL"}'
-                 f'  (energy {gen["win_energy"]*100:.0f}%, corr {gen["pdp_corr"]:.2f})', fontsize=10)
+    win = min(n_sub, int(tau_ns.max() / bin_ns) + 6); x = np.arange(win) * bin_ns
+    ax.bar(x, pdp[:win], width=bin_ns * 0.9, color='#4C9BE8', alpha=0.6, label=f'empirical PDP ({N_SAMP} samples)')
+    ax.plot(x, theo[:win], 'C3o-', ms=3, lw=1, label='TR 38.901 clusters (binned)')
+    ax.set(xlabel='delay (ns)', ylabel='normalized power')
+    ax.set_title(f'{model}  ·  data PDP {"PASS" if gen["ok"] else "FAIL"}'
+                 f'  (energy {gen["win_energy"]*100:.0f}%)', fontsize=10)
     ax.legend(fontsize=7)
 
-fig.suptitle('Channel verification — TR 38.901 §7.7.1 conformance (config) + realized statistics (data)',
+    # --- right: per-sample spatial eigenvalue spectrum (N_SAMP samples) ---
+    # Per-sample covariance (rotation-invariant, so the n_orient randomization does
+    # NOT wash out the LOS/NLOS distinction the way an orientation-averaged covariance
+    # would). Normalize each sample to its top mode, then average the spectra.
+    ax = axes[i][2]
+    R = np.einsum('nsi,nsj->nij', Hte.conj(), Hte) / n_sub      # (N_SAMP, n_tx, n_tx)
+    ev = np.sort(np.linalg.eigvalsh(R).real, axis=1)[:, ::-1]   # per-sample, descending
+    ev = np.clip((ev / ev[:, :1]).mean(0), 1e-4, None)          # normalize + average
+    ax.semilogy(np.arange(1, n_tx + 1), ev, 'o-', color='#7E57C2', ms=4,
+                label=f'mean eigenvalues ({N_SAMP} samples)')
+    ax.set(xlabel='eigenvalue index', ylabel='normalized eigenvalue (log)', ylim=(1e-4, 1.5))
+    ax.set_title(f'{model}  ·  spatial richness (steep=LOS, flat=rich NLOS)', fontsize=10)
+    ax.legend(fontsize=7)
+
+fig.suptitle('Channel verification — TR 38.901 §7.7.1 conformance (config) + realized statistics (data, 2000 samples)',
              y=1.005, fontsize=13, fontweight='bold')
 plt.tight_layout(); plt.show()
 """)
