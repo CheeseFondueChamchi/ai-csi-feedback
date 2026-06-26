@@ -113,6 +113,8 @@ from .verify import (
 )
 # AWGN for noisy CSI-estimation modeling (SNR / pathloss)
 from .noise import add_awgn
+# Report builder (PMI + eType II 2D) shared by gen + refresh
+from .reports import build_reports
 # Shared IO contract: ChannelConfig, dataset paths, save/load helpers
 from .config import (
     ChannelConfig,
@@ -137,7 +139,7 @@ __all__ = [
     "subband_precoders", "sgcs_subband", "etype2_pmi_2d",
     "generate_sionna_csi", "generate_sionna_csi_parallel", "generate_sionna_csi_mixed",
     "CDL_TABLES", "cdl_reference", "verify_cdl_table", "verify_generated",
-    "format_report", "add_awgn",
+    "format_report", "add_awgn", "build_reports",
     "ChannelConfig", "save_dataset", "load_dataset", "dataset_dir",
     "REPO_ROOT", "DATA_ROOT", "RAW_ROOT", "TRAINED_ROOT",
 ]
