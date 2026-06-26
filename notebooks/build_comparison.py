@@ -24,19 +24,21 @@ def code(s):
 # ---------------------------------------------------------------------------
 # Cell 1 — Title / intro
 # ---------------------------------------------------------------------------
-md(r"""# Stage 4 — Comparison: PMI Codebook vs AI Encoder/Decoder
+md(r"""# Stage 4 — Comparison: eType II Codebook vs AI Encoder/Decoder
 
-This notebook compares two CSI-feedback approaches on the **same channel**, plotting
+This notebook compares CSI-feedback approaches on the **same channel**, plotting
 **SGCS vs feedback report length (bits)**:
 
 | Approach | Description |
 |---|---|
-| **PMI codebooks** | Type I, Type II, and **enhanced Type II (Rel-16)** DFT precoders; real, discrete bit cost |
+| **eType II 2D** | **enhanced Type II (Rel-16)** spatial-frequency codebook; real, discrete bit cost (per-subband metric) |
 | **AI encoder/decoder** | Two model families — **CsiNet** (CNN) vs **TransNet** (transformer) — quantised latent of *n\_code × b* bits |
 | **Truncation reference** | Near-lossless angular-delay truncation; the uncompressed upper-bound |
 
-CSI is estimated under **AWGN at the operating SNR**, so the PMI points reflect estimation
-error as well as quantization. A **model-complexity table** (params + FLOPs) accompanies the figure.
+(The legacy wideband **Type I / Type II** codebooks are not shown — the comparison focuses on
+the Rel-16 eType II baseline vs AI.) CSI is estimated under **AWGN at the operating SNR**, so
+the codebook points reflect estimation error as well as quantization. A **model-complexity
+table** (params + FLOPs) accompanies the figure.
 
 > **All numbers are loaded from artifacts produced by Stages 1–3.**
 > No model training or channel simulation is performed here.
@@ -205,7 +207,7 @@ def plot_etype2d_panel(ax, ch, title):
 
 
 def plot_panel(ax, ch, title):
-    '''Draw one comparison panel: AI families vs PMI codebook families.'''
+    '''Draw one comparison panel: AI families (wideband SGCS frontier).'''
     # --- AI frontiers per family (CsiNet vs TransNet) ---
     for fam, front in ch['ai_frontier'].items():
         col, mk = AI_STYLE.get(fam, ('#4C9BE8', 'o'))
@@ -214,12 +216,6 @@ def plot_panel(ax, ch, title):
         for pts in ch['ai_by_family'].get(fam, {}).values():   # faint operating points
             ax.scatter([p[0] for p in pts], [p[1] for p in pts], s=16,
                        color=col, alpha=0.30, zorder=3)
-
-    # --- PMI codebook families (Type I / Type II / eType II) ---
-    for fam, pts in ch['pmi_by_family'].items():
-        col, mk = PMI_STYLE.get(fam, ('#888888', '^'))
-        ax.plot([p[1] for p in pts], [p[2] for p in pts], marker=mk, ls='-',
-                color=col, lw=1.6, ms=6, zorder=4, label=f'PMI: {fam}')
 
     # --- references ---
     if not np.isnan(ch['sgcs_trunc']):
@@ -250,8 +246,8 @@ else:
         disp = LABEL_DISPLAY.get(lbl, lbl)
         plot_panel(axes[0][j], ch, disp)
         plot_etype2d_panel(axes[1][j], ch, disp)
-    fig.suptitle('Top: wideband PMI (Type I/II) vs AI  |  '
-                 'Bottom: true 2D eType II (per-subband metric)',
+    fig.suptitle('Top: AI encoder SGCS-vs-bits (wideband)  |  '
+                 'Bottom: eType II 2D codebook (per-subband metric)',
                  fontsize=12, fontweight='bold', y=1.005)
     plt.tight_layout()
     plt.show()
@@ -265,9 +261,6 @@ code(r"""import pandas as pd
 # ── per-channel SGCS-vs-bits summary (codebook families + AI families) ──────
 for lbl, ch in channels.items():
     rows = []
-    for fam, pts in ch['pmi_by_family'].items():
-        for scheme, bits, sgcs in pts:
-            rows.append({'method': f'PMI/{fam}', 'config': scheme, 'bits': bits, 'SGCS': sgcs})
     for fam, archs in ch['ai_by_family'].items():
         for arch, pts in archs.items():
             best = max(pts, key=lambda p: p[1])
@@ -389,9 +382,9 @@ md(r"""## AI encoder vs PMI — SGCS-vs-bits sweep (choose the model)
 `sweep_ai_vs_pmi(label, arch)` runs a **live** sweep on **one unified per-subband axis**:
 it loads a trained AI model, encodes the test channel, quantizes the latent at a range of
 bits/dim, decodes, and derives **per-subband** precoders from the reconstruction — then
-plots its SGCS-vs-bits against **Type I/II (per-subband)** and **eType II 2D**, all scored
-with the same `sgcs_subband` metric (apples-to-apples; no more wideband-vs-per-subband
-split). **Change `SWEEP_LABEL` / `SWEEP_ARCH` below and re-run** to compare any model.
+plots its SGCS-vs-bits against the **eType II 2D** codebook, both scored with the same
+`sgcs_subband` metric (apples-to-apples). **Change `SWEEP_LABEL` / `SWEEP_ARCH` below and
+re-run** to compare any model.
 """)
 
 code(r"""import torch
@@ -429,15 +422,17 @@ def sweep_ai_vs_pmi(label, arch, ai_bits=(1, 2, 3, 4, 5, 6, 8), n_eval=2000, sho
         Hq = csi.from_angular_delay(csi.real_imag_to_complex(yq * sdv + mu), n_sub)
         # per-subband precoders from the AI reconstruction -> sgcs_subband (unified metric)
         ai.append((int(M * b), float(csi.sgcs_subband(W_sb_true, csi.subband_precoders(Hq, n_sb)))))
-    # unified per-subband codebook baselines from reports: Type I / Type II (SB) + eType II 2D
+    # unified per-subband codebook baseline from reports: eType II 2D only
+    # (Type I / Type II excluded from the comparison).
     by_fam = {}
     for f, b, s in zip([str(f) for f in reports.get('sb_family', [])],
                        [int(x) for x in reports.get('sb_bits', [])],
                        [float(x) for x in reports.get('sb_sgcs', [])]):
+        if f.startswith('Type'):              # drop wideband/SB Type I & Type II
+            continue
         by_fam.setdefault(f, []).append((b, s))
     if show:
-        STY = {'Type I': ('#E06C3A', '^'), 'Type II': ('#E0A23A', 's'),
-               'eType II 2D': ('#C0392B', 'D')}
+        STY = {'eType II 2D': ('#C0392B', 'D')}
         fig, ax = plt.subplots(figsize=(7.8, 5))
         ax.plot([x[0] for x in ai], [x[1] for x in ai], 'o-', color='#4C9BE8',
                 lw=2.0, ms=6, zorder=5, label=f'AI: {arch}')
