@@ -463,12 +463,14 @@ md(r"""## eType II PMI verification — SGCS at fixed feedback-bit budgets
 
 Is our `etype2_pmi_2d` *right*? For each CDL profile we build the eType II SGCS-vs-bits
 **Pareto curve** (best SGCS over an (L, M, β) grid) and read off the SGCS achievable at
-fixed budgets **32 / 64 / 128 / 256 / 512 bits**, then compare to the 3GPP/RAN1 reported
-eType II baseline (≈0.90 @ 300 bits, UMa / 32-port / rank-1 / 4 Rx).
+fixed budgets **32 / 64 / 128 / 256 / 512 bits**, then compare to the **TR 38.843**
+eType II baseline (CSI eval spreadsheet, rank-1, 1-on-1 training, 14 companies):
+**SGCS 0.65–0.83, median 0.705, at ~59–80 bits** (rank-2 0.723, rank-4 0.624).
 
-A correct codebook should give a **monotonically rising** SGCS with more bits, and reach
-the reported range at high budgets (LOS profiles near it, rich-NLOS a bit below — ours is
-the stricter per-subband metric on a harder single-Rx CDL link).
+A correct codebook gives **monotonically rising** SGCS with bits and lands **in the TR
+rank-1 band** at comparable overhead (LOS profiles at/above it, rich-NLOS within it —
+ours is the stricter per-subband metric on a single-Rx CDL link, so the match is on
+range, not exact value).
 """)
 
 code(r"""import matplotlib.pyplot as plt
@@ -502,9 +504,9 @@ print('eType II SGCS at fixed bit budgets (per-subband, CDL):')
 display(df)
 mono = all(df.iloc[i].dropna().is_monotonic_increasing for i in range(len(df)))
 print('monotone SGCS-vs-budget:', 'OK ✅' if mono else 'CHECK ❌',
-      '| reported eType II baseline ~0.90 @ 300b (UMa, 4 Rx)')
+      '| TR 38.843 eType II rank-1 baseline: SGCS 0.65-0.83, median 0.705 @ 59-80 bits')
 
-# figure: Pareto curves + budget gridlines + reported baseline
+# figure: Pareto curves + budget gridlines + TR 38.843 rank-1 baseline band
 fig, ax = plt.subplots(figsize=(8.5, 5))
 for model, pts in curves.items():
     bx = sorted({b for b, _ in pts})
@@ -512,12 +514,13 @@ for model, pts in curves.items():
     ax.plot(bx, paretoy, 'o-', ms=4, lw=1.6, label=model)
 for B in BUDGETS:
     ax.axvline(B, ls=':', color='gray', alpha=0.5)
-ax.scatter([300], [0.9042], marker='*', s=240, color='red', zorder=6,
-           label='reported eType II (0.904@300b)')
-ax.axhspan(0.917, 0.954, color='red', alpha=0.06)
+# authoritative TR 38.843 eType II rank-1 SGCS band over its 59-80 bit overhead range
+ax.axhspan(0.647, 0.830, color='red', alpha=0.08, label='TR 38.843 eType II rank-1 (0.65-0.83)')
+ax.axvspan(59, 80, color='orange', alpha=0.08, label='TR overhead (59-80 b)')
+ax.axhline(0.705, ls='--', color='red', alpha=0.6)
 ax.set_xscale('log')
 ax.set(xlabel='feedback report length (bits)', ylabel='eType II SGCS (per-subband)',
-       ylim=(0.2, 1.0), title='eType II PMI verification — SGCS vs bit budget vs 3GPP baseline')
+       ylim=(0.2, 1.0), title='eType II PMI verification — ours vs TR 38.843 baseline')
 ax.set_xticks(BUDGETS); ax.set_xticklabels([str(b) for b in BUDGETS])
 ax.legend(fontsize=8); plt.tight_layout(); plt.show()
 """)
